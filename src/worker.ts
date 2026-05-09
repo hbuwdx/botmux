@@ -2843,6 +2843,14 @@ process.on('message', async (raw: unknown) => {
       if (backend) {
         if ('sendText' in backend && 'sendSpecialKeys' in backend) {
           (backend as any).sendText(msg.content);
+          // Beat between text and Enter so the CLI's slash-command picker has
+          // time to register the match before submit. Without this, Codex
+          // (and likely other Ink-based TUIs) fires Enter while the picker
+          // is still building, dismisses the match, and submits the literal
+          // `/clear` as a regular user prompt — visible to the user as
+          // "/clear + 换行" stuck in conversation history. 200ms mirrors the
+          // codex adapter's own writeInput paste-detection delay.
+          await new Promise(r => setTimeout(r, 200));
           (backend as any).sendSpecialKeys('Enter');
         } else {
           backend.write(msg.content + '\r');
