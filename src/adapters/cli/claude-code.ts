@@ -1,15 +1,30 @@
-import { existsSync, statSync, openSync, readSync, closeSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
+import { existsSync, statSync, openSync, readSync, closeSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { resolveCommand } from './registry.js';
 import type { CliAdapter, PtyHandle } from './types.js';
 import { findJsonlContainingFingerprint, jsonlContainsFingerprint, normaliseForFingerprint } from '../../services/claude-transcript.js';
 
+/** Resolve cwd to its canonical (symlink-free) absolute path for project-hash
+ *  computation. Claude Code itself runs `process.cwd()` which the kernel returns
+ *  already realpath'd via getcwd(3) — so its on-disk project hash always reflects
+ *  the realpath, not the symlink we may have spawned it under. We must mirror
+ *  that here, otherwise a deployment whose `workingDir` is a symlink (e.g.
+ *  `/home/user` → `/data00/home/user`) computes the wrong project dir, the
+ *  bridge watcher tails a non-existent file, submit-confirm never sees the
+ *  user line, and the no-`botmux send` fallback never emits. realpathSync
+ *  throws on non-existent paths — fall back to the raw cwd in that case so a
+ *  pre-existence check upstream can still report a useful error. */
+function realpathCwd(cwd: string): string {
+  try { return realpathSync(cwd); } catch { return cwd; }
+}
+
 /** Resolve the JSONL transcript path Claude Code writes user/assistant turns to.
  *  Claude Code's project-hash scheme replaces every non-[A-Za-z0-9-] char with `-`
- *  (observed: `/foo/life_workspace` → `-foo-life-workspace`; `/`, `.`, `_` all become `-`). */
+ *  (observed: `/foo/life_workspace` → `-foo-life-workspace`; `/`, `.`, `_` all become `-`).
+ *  Always operates on realpath(cwd) — see realpathCwd above. */
 export function claudeJsonlPathForSession(sessionId: string, cwd: string): string {
-  const projectHash = cwd.replace(/[^A-Za-z0-9-]/g, '-');
+  const projectHash = realpathCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
   return join(homedir(), '.claude', 'projects', projectHash, `${sessionId}.jsonl`);
 }
 
@@ -112,7 +127,11 @@ export function resolveJsonlFromPid(pid: number, expectedCwd: string): { path: s
   if (!parsed || typeof parsed !== 'object') return null;
   if (parsed.pid !== pid) return null;
   if (typeof parsed.sessionId !== 'string' || !SESSION_UUID_RE.test(parsed.sessionId)) return null;
-  if (typeof parsed.cwd !== 'string' || parsed.cwd !== expectedCwd) return null;
+  // Compare on realpath: Claude's pid file always records the canonical cwd
+  // (Node's process.cwd() returns getcwd(3)), but `expectedCwd` may still be
+  // the symlink we spawned under. A raw equality check would reject a
+  // legitimate match when workingDir is e.g. /home/x → /data00/home/x.
+  if (typeof parsed.cwd !== 'string' || realpathCwd(parsed.cwd) !== realpathCwd(expectedCwd)) return null;
   if (typeof parsed.procStart === 'string') {
     const live = readProcStarttime(pid);
     if (live === null && process.platform === 'linux') return null;
