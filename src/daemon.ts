@@ -277,6 +277,45 @@ function getActiveCount(): number {
   return count;
 }
 
+/**
+ * Freeze the previous turn's streaming card at "idle" and mark a new turn so the
+ * next screen_update from the worker POSTs a fresh streaming card instead of
+ * PATCH-ing the previous one. Shared by the normal-message path and the
+ * passthrough slash-command path (/model, /clear, /compact, etc.) — without
+ * this, passthrough commands silently PATCH the previous card and the user
+ * sees no visible response.
+ */
+function beginNewTurn(ds: DaemonSession, title: string): void {
+  if (ds.streamCardId && ds.workerPort) {
+    const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+    const dsBotCfg = getBot(ds.larkAppId).config;
+    const prevTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(dsBotCfg.cliId);
+    const prevMode = ds.displayMode ?? 'hidden';
+    const frozenCard = buildStreamingCard(
+      ds.session.sessionId, sessionAnchorId(ds), readUrl, prevTitle,
+      ds.lastScreenContent ?? '', 'idle', dsBotCfg.cliId,
+      prevMode, ds.streamCardNonce, ds.currentImageKey,
+      !!ds.adoptedFrom, false,
+    );
+    scheduleCardPatch(ds, frozenCard);
+
+    if (ds.streamCardNonce && ds.streamCardId !== CARD_POSTING_SENTINEL) {
+      if (!ds.frozenCards) ds.frozenCards = new Map();
+      ds.frozenCards.set(ds.streamCardNonce, {
+        messageId: ds.streamCardId,
+        content: ds.lastScreenContent ?? '',
+        title: prevTitle,
+        displayMode: prevMode,
+        imageKey: ds.currentImageKey,
+      });
+      saveFrozenCards(ds.session.sessionId, ds.frozenCards);
+    }
+  }
+  ds.streamCardPending = true;
+  ds.currentTurnTitle = title.substring(0, 50);
+  persistStreamCardState(ds);
+}
+
 // Dependencies passed to command-handler
 const commandDeps: CommandHandlerDeps = {
   activeSessions,
@@ -658,6 +697,10 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     if (PASSTHROUGH_COMMANDS.has(cmd)) {
       const ds = activeSessions.get(sessionKey(anchor, larkAppId));
       if (ds?.worker && !ds.worker.killed) {
+        // Mark a new turn so the CLI's response to /model, /clear, /compact, etc.
+        // shows up as a fresh streaming card instead of silently PATCH-ing the
+        // previous turn's card.
+        beginNewTurn(ds, commandContent);
         ds.worker.send({ type: 'raw_input', content: commandContent } as DaemonToWorker);
         markSessionActivity(ds);
         logger.info(`[${anchor.substring(0, 12)}] Passthrough ${cmd} → worker`);
@@ -887,39 +930,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
           cliId: dsBotCfgForMsg.cliId,
           cliPathOverride: dsBotCfgForMsg.cliPathOverride,
         });
-    // Freeze the previous turn's card at "idle" before starting a new turn
-    if (ds.streamCardId && ds.workerPort) {
-      const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
-      const dsBotCfg = getBot(ds.larkAppId).config;
-      const prevTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(dsBotCfg.cliId);
-      const prevMode = ds.displayMode ?? 'hidden';
-      const frozenCard = buildStreamingCard(
-        ds.session.sessionId, sessionAnchorId(ds), readUrl, prevTitle,
-        ds.lastScreenContent ?? '', 'idle', dsBotCfg.cliId,
-        prevMode, ds.streamCardNonce, ds.currentImageKey,
-        !!ds.adoptedFrom, false,
-      );
-      // Freeze through the serialization queue to avoid racing with an in-flight PATCH.
-      // scheduleCardPatch replaces any stale pending item (latest-wins).
-      scheduleCardPatch(ds, frozenCard);
-
-      // Cache frozen card data so historical cards can still be toggled (expand/collapse)
-      if (ds.streamCardNonce && ds.streamCardId !== CARD_POSTING_SENTINEL) {
-        if (!ds.frozenCards) ds.frozenCards = new Map();
-        ds.frozenCards.set(ds.streamCardNonce, {
-          messageId: ds.streamCardId,
-          content: ds.lastScreenContent ?? '',
-          title: prevTitle,
-          displayMode: prevMode,
-          imageKey: ds.currentImageKey,
-        });
-        saveFrozenCards(ds.session.sessionId, ds.frozenCards);
-      }
-    }
-    // Mark new turn — next screen_update will create a fresh streaming card
-    ds.streamCardPending = true;
-    ds.currentTurnTitle = parsed.content.substring(0, 50);
-    persistStreamCardState(ds);
+    beginNewTurn(ds, parsed.content);
     ds.worker.send({ type: 'message', content: msgContent } as DaemonToWorker);
   } else {
     // Worker not running — re-fork with resume. This is a NEW turn, so drop
