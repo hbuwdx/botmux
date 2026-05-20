@@ -117,7 +117,7 @@ description: 需要查看当前飞书会话历史消息时触发。话题群/话
 
 想回顾当前飞书会话里用户之前发过什么、别的机器人说了什么时使用。**话题群和普通群都支持**：默认按当前 session 范围读取；话题/thread 会话只返回当前话题内消息，普通群 chat-scope 会话返回整群最近 N 条（默认 50，按时间倒序取尾部、再按时间正序返回）。觉得历史太多就把 \`--limit\` 调小，需要更多上下文就调大。
 
-如果你在 thread 里需要读取 thread 外的群聊上下文（典型场景：用户在普通群讨论后用 \`/t\` 单开话题叫你处理），使用 \`botmux history --scope ambient --limit 20\`。它会读取当前 thread 所在群里、thread root 之前的最近消息，并排除当前 thread 本身，适合作为环境上下文。
+如果你在 thread 里需要读取 thread 外的群聊上下文（典型场景：用户在普通群讨论后用 \`/t\` 单开话题叫你处理），使用 \`botmux history --scope ambient --limit 20\`。它会读取当前 thread 所在群里、thread root 之前的最近消息，并排除当前 thread 本身，适合作为环境上下文。注意隐私边界：ambient 会读取 thread 外群聊消息，仅在用户明确需要群聊背景时使用，并优先使用较小的 limit。
 
 ## 用法
 
@@ -148,7 +148,7 @@ JSON 格式，字段：
   "chatId": "...",
   "scope": "thread" | "chat" | "ambient",
   "sessionScope": "thread" | "chat",
-  "rootMessageId": "...",     // 仅 scope=thread 时存在
+  "rootMessageId": "...",     // 仅 sessionScope=thread 时存在（包括 scope=ambient）
   "ambient": {                 // 仅 scope=ambient 时存在
     "source": "chat",
     "beforeCreateTime": "...",
@@ -165,7 +165,7 @@ JSON 格式，字段：
 
 - \`scope=thread\`：只返回属于当前话题的消息（按 rootMessageId 过滤）
 - \`scope=chat\`：返回当前群整群最近 N 条消息（不限于 session 创建之后，需要更老的就把 --limit 调大）
-- \`scope=ambient\`：返回当前 thread 外的群聊上下文，默认排除当前 thread，并优先限制在 thread root 创建前，适合 \`/t\` 后补充群内讨论背景
+- \`scope=ambient\`：返回当前 thread 外的群聊上下文，默认排除当前 thread，并优先限制在 thread root 创建前，适合 \`/t\` 后补充群内讨论背景；仅在用户明确需要群聊背景时使用，并优先小 \`--limit\`
 - \`senderType="app"\` 表示机器人发的消息（包括 Claude Code / Codex / 其它 bot），\`"user"\` 表示用户
 - **合并转发**消息会自动展开：\`msgType\` 变为 \`merge_forward_expanded\`，\`content\` 是 \`<forwarded_messages>...</forwarded_messages>\` XML（含 \`<participants>\` 别名表 + 嵌套 \`<msg from="A">\` 节点），与 daemon 实时事件路径一致
 - 需要先把 JSON 读进来再做总结，不要直接把 JSON 扔给用户

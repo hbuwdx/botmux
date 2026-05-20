@@ -26,6 +26,8 @@ describe('built-in botmux-history skill', () => {
     expect(history!.content).toContain('scope=chat');
     expect(history!.content).toContain('--scope ambient');
     expect(history!.content).toContain('thread 外的群聊上下文');
+    expect(history!.content).toContain('仅在用户明确需要群聊背景时使用');
+    expect(history!.content).toContain('sessionScope=thread');
   });
 
   it('retires the old botmux-thread-messages name', () => {

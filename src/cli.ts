@@ -2343,6 +2343,11 @@ async function cmdHistory(rest: string[]): Promise<void> {
       process.exit(1);
     }
 
+    if (effectiveScope === 'ambient' && isChatScope) {
+      console.error('当前 session 是 chat-scope，没有 thread root 可作为 ambient 边界。请使用 --scope chat。');
+      process.exit(1);
+    }
+
     let ambientBeforeCreateTime: string | undefined;
     if (effectiveScope === 'ambient') {
       try {
