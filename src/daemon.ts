@@ -406,6 +406,32 @@ async function maybeAutoBindDefaultOncall(
   return r.entry;
 }
 
+/**
+ * Resolve this bot's `defaultWorkingDir` for a new-topic spawn, if any.
+ * Unlike `defaultOncall`, this is a pure runtime fallback: no state is
+ * written to bots.json and the chat is NOT bound to oncall (so the
+ * permission model stays unchanged). `/cd <path>` can still switch the
+ * working dir mid-session; the next new topic falls back to this default.
+ *
+ * Returns the expanded path when the configured field points to a real
+ * directory; logs and returns undefined when the path is missing/invalid
+ * so the caller falls through to the repo-select card instead of
+ * spawning into a bad cwd.
+ */
+function resolveBotDefaultWorkingDir(larkAppId: string): string | undefined {
+  const raw = getBot(larkAppId).config.defaultWorkingDir;
+  if (!raw) return undefined;
+  const resolved = expandHome(raw);
+  try {
+    if (statSync(resolved).isDirectory()) return resolved;
+  } catch { /* not a dir */ }
+  logger.warn(
+    `[${larkAppId}] defaultWorkingDir invalid (${resolved}); ` +
+    `falling back to repo-select card`,
+  );
+  return undefined;
+}
+
 async function replyInvalidWorkingDirs(
   anchor: string,
   larkAppId: string,
@@ -593,7 +619,14 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     ? findInheritablePeer({ scope, anchor, chatId, chatType, selfAppId: larkAppId })
     : null;
 
-  const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir;
+  // Last-resort fallback: this bot's `defaultWorkingDir`. Pure runtime — no
+  // oncall binding written, no permission-model change. Lets a single-repo
+  // bot skip the repo-select card without committing to oncall semantics.
+  const botDefaultWorkingDir = (!oncallEntry && !inheritedFrom)
+    ? resolveBotDefaultWorkingDir(larkAppId)
+    : undefined;
+
+  const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir ?? botDefaultWorkingDir;
   const ds: DaemonSession = {
     session,
     worker: null,
@@ -631,7 +664,9 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     forkWorker(ds, prompt);
     const reason = oncallEntry
       ? `oncall-bound chat ${chatId}`
-      : `inherited from sibling session ${inheritedFrom!.sessionId.substring(0, 8)} (app=${inheritedFrom!.larkAppId ?? 'unknown'})`;
+      : inheritedFrom
+      ? `inherited from sibling session ${inheritedFrom.sessionId.substring(0, 8)} (app=${inheritedFrom.larkAppId ?? 'unknown'})`
+      : `bot defaultWorkingDir`;
     logger.info(`[${tag(ds)}] ${reason} → workingDir=${pinnedWorkingDir}, skipped repo select`);
     return;
   }
@@ -938,7 +973,13 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
         })
       : null;
 
-    const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir;
+    // Last-resort fallback: this bot's `defaultWorkingDir`. See handleNewTopic
+    // for the symmetric block — both call sites must stay in sync.
+    const botDefaultWorkingDir = (!oncallEntry && !inheritedFrom)
+      ? resolveBotDefaultWorkingDir(larkAppId)
+      : undefined;
+
+    const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir ?? botDefaultWorkingDir;
     // Now we know the message will spawn or pend a real session — resolve
     // sender (may await contact API budget) since every downstream branch
     // injects it either into the immediate prompt or stashes it on
@@ -982,7 +1023,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       forkWorker(newDs, prompt);
       const reason = oncallEntry
         ? `oncall-bound chat ${autoCreateChatId}`
-        : `inherited from peer session ${inheritedFrom!.sessionId.substring(0, 8)} (app=${inheritedFrom!.larkAppId ?? 'unknown'})`;
+        : inheritedFrom
+        ? `inherited from peer session ${inheritedFrom.sessionId.substring(0, 8)} (app=${inheritedFrom.larkAppId ?? 'unknown'})`
+        : `bot defaultWorkingDir`;
       logger.info(`[${tag(newDs)}] ${reason} → workingDir=${pinnedWorkingDir}, skipped repo select`);
       return;
     }

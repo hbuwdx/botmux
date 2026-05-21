@@ -435,6 +435,7 @@ When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfi
 | `cliPathOverride` | No | Absolute path to the CLI entry, for wrappers / routers; typical use: `ccr`, `claude-w`, `aiden-x-claude`, etc. |
 | `backendType` | No | Session backend: `pty` or `tmux` (auto-detected by default) |
 | `workingDir` | No | Default working directory, supports comma-separated |
+| `defaultWorkingDir` | No | Single-repo default: new topics with no oncall binding and no peer-session inheritance spawn directly here, skipping the repo-select card. `/cd <path>` still switches mid-session; the next new topic falls back to this default. **Difference from `defaultOncall`:** does NOT write `oncallChats` and does NOT change the `canTalk` / `canOperate` permission model |
 | `allowedUsers` | No | Allowed users (email prefixes or open_ids) |
 | `oncallChats` | No | Oncall bindings (written by `/oncall bind`), e.g. `[{ "chatId": "oc_xxx", "workingDir": "~/projects/foo" }]`; any group member can @ the bot |
 
