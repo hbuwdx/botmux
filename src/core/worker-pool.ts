@@ -112,11 +112,12 @@ export function cardUsageLimit(ds: DaemonSession): CliUsageLimitState | undefine
 
 function scheduleUsageLimitCardPatch(ds: DaemonSession): void {
   if (ds.lastScreenStatus !== 'limited') return;
-  if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !ds.workerPort) return;
+  const port = ds.workerPort ?? ds.session.webPort;
+  if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !port) return;
 
   const bot = getBot(ds.larkAppId);
   const effectiveCliId = sessionCliId(ds, bot.config);
-  const readUrl = `http://${config.web.externalHost}:${ds.workerPort}`;
+  const readUrl = `http://${config.web.externalHost}:${port}`;
   const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
   const cardJson = buildStreamingCard(
     ds.session.sessionId,
@@ -161,6 +162,12 @@ function armUsageLimitRetryTimer(ds: DaemonSession, previous?: CliUsageLimitStat
     persistStreamCardState(ds);
     scheduleUsageLimitCardPatch(ds);
   }, delayMs);
+}
+
+export function restoreUsageLimitRuntimeState(ds: DaemonSession): void {
+  if (!ds.usageLimit) return;
+  ds.lastScreenStatus = 'limited';
+  armUsageLimitRetryTimer(ds);
 }
 
 function updateUsageLimitState(ds: DaemonSession, usageLimit?: CliUsageLimitState): void {
