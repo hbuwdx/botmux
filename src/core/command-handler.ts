@@ -913,7 +913,13 @@ export async function handleCommand(
             transferOwnerTo: senderOpenId,
             notifyOwnerOpenId: senderOpenId,
           });
-          const link = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+          // Prefer the shareable join link (others can click to *join*); fall
+          // back to the member-only applink URL when Lark's link API failed.
+          const applink = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+          const link = result.shareLink ?? applink;
+          if (!result.shareLink && result.shareLinkError) {
+            logger.warn(`[${logTag}] /group share-link unavailable, using applink: ${result.shareLinkError}`);
+          }
           // Partial failures are non-fatal — the chat exists; surface them as
           // hints so the user knows whether to expect to be auto-invited.
           const hints: string[] = [];
