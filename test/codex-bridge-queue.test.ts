@@ -59,6 +59,29 @@ describe('CodexBridgeQueue', () => {
     expect(ready.map(t => t.turnId)).toEqual(['t2']);
   });
 
+  it('CoCo type-ahead: both turns marked upfront, interleaved events attribute in order', () => {
+    // Models the CoCo type-ahead path: the worker writes msg1 AND msg2 to the
+    // PTY back-to-back (type-ahead), so both turns are marked before either is
+    // processed. CoCo parks msg2 in its TUI queue and writes its events.jsonl
+    // user event only at dequeue time, so the transcript the bridge ingests is
+    // strictly interleaved (user1 → asst1 → user2 → asst2). This is exactly
+    // what keeps the single-`collecting` pointer correct. Marks land at t=100
+    // while the user events arrive much later (dequeue time) — the tooOld gate
+    // (ts < markTime - 5s) must NOT trip here because events come AFTER marks.
+    const q = new CodexBridgeQueue();
+    q.mark('t1', 'first prompt', 100);
+    q.mark('t2', 'second prompt', 100);  // type-ahead: marked ~immediately
+    q.ingest([
+      userEv('first prompt', 'u1', 5_000),
+      asstEv('first reply', 'a1', 6_000),
+      userEv('second prompt', 'u2', 12_000),  // dequeued only after turn 1
+      asstEv('second reply', 'a2', 13_000),
+    ]);
+    const ready = q.drainEmittable();
+    expect(ready.map(t => t.turnId)).toEqual(['t1', 't2']);
+    expect(ready.map(t => t.finalText)).toEqual(['first reply', 'second reply']);
+  });
+
   it('drainEmittable holds turn that started but has no finalText yet', () => {
     const q = new CodexBridgeQueue();
     q.mark('t1', 'a query', 100);

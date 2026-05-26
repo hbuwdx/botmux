@@ -252,6 +252,20 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
     // transcript bridge never drains.
     readyPattern: /⏵⏵|⬡/,
     systemHints: BOTMUX_SHELL_HINTS,
+    // CoCo 0.120.32+ accepts a new message while the current turn is still
+    // running: it parks it in the TUI's own queue ("↑ Press up to edit queued
+    // messages") and processes it after the current turn finishes — input is
+    // neither dropped nor garbled (the earlier concern that downgraded CoCo to
+    // wait-for-idle). Crucially it writes the queued message's events.jsonl
+    // user event only at DEQUEUE time, so the transcript the bridge fallback
+    // reads stays interleaved (user1 → asst1 → user2 → asst2) and the
+    // CodexBridgeQueue's single-`collecting` attribution stays correct without
+    // the queued_command upgrade Claude needed. The submit log history.jsonl
+    // IS written at submit time (even for a queued message), so writeInput's
+    // verification still confirms the submit. Worker only honours type-ahead
+    // for the non-Codex structured bridge, so this flag activates CoCo while
+    // leaving Codex serial.
+    supportsTypeAhead: true,
     altScreen: false,
   };
 }

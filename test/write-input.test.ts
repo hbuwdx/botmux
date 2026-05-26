@@ -417,8 +417,8 @@ describe('supportsTypeAhead flag', () => {
     expect(createClaudeCodeAdapter('/bin/claude').supportsTypeAhead).toBe(true);
   });
 
-  it('coco: undefined (input handling is fork of claude-code but type-ahead untested)', () => {
-    expect(createCocoAdapter('/bin/coco').supportsTypeAhead).toBeUndefined();
+  it('coco: true (0.120.32+ parks submit-while-busy in its TUI queue, dequeues at idle)', () => {
+    expect(createCocoAdapter('/bin/coco').supportsTypeAhead).toBe(true);
   });
 
   it.each(PLAIN_ADAPTERS)('%s: undefined (default behavior)', (_name, adapter) => {
