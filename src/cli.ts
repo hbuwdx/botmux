@@ -2570,7 +2570,8 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // Card v2 body builder helpers — extracted to im/lark/md-card.ts so the
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
-import { buildCardBodyElements, hasMarkdown } from './im/lark/md-card.js';
+import { buildCardBodyElements, hasMarkdown, brandFooterSegment } from './im/lark/md-card.js';
+import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
 import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
 
@@ -2902,7 +2903,12 @@ async function cmdSend(rest: string[]): Promise<void> {
       // Oncall groups usually address whoever triggered this turn (may not be
       // the session owner). Bot recipients are filtered out so footer chrome
       // cannot accidentally wake a sibling bot.
-      const footerParts = ['[botmux](https://github.com/deepcoldy/botmux)'];
+      // Brand segment honours this bot's configured brandLabel (unset →
+      // default botmux, '' → suppressed, else custom). Same resolver/rule as
+      // the daemon's card builders so both send paths render identically.
+      const footerParts: string[] = [];
+      const brandSeg = brandFooterSegment(resolveBrandLabel(appId));
+      if (brandSeg) footerParts.push(brandSeg);
       // All real mentions land on one footer line: human addressee first, then
       // explicit @ targets (incl. handoff bots), then cc. Ids already inlined in
       // the body prose are skipped. Top-level publish keeps sendTo empty.
@@ -2915,12 +2921,15 @@ async function cmdSend(rest: string[]): Promise<void> {
       if (footerRecipients.length > 0) {
         footerParts.push(`发送给：${footerRecipients.map(id => `<at id=${id}></at>`).join(' ')}`);
       }
-      elements.push({ tag: 'hr' });
-      elements.push({
-        tag: 'markdown',
-        text_size: 'notation_small_v2',
-        content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
-      });
+      // Empty brand + no recipients → no footer at all (skip the orphan HR).
+      if (footerParts.length > 0) {
+        elements.push({ tag: 'hr' });
+        elements.push({
+          tag: 'markdown',
+          text_size: 'notation_small_v2',
+          content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
+        });
+      }
 
       const cardJson = JSON.stringify({
         schema: '2.0',

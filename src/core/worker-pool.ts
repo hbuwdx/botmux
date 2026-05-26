@@ -21,7 +21,7 @@ import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
 import { claudeJsonlPathForSession } from '../adapters/cli/claude-code.js';
 import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
-import { getBot, getAllBots } from '../bot-registry.js';
+import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
@@ -1229,6 +1229,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           assistantText: msg.assistantText,
           assistantLabel: getCliDisplayName(effectiveCliId),
           recipientOpenId,
+          brand: resolveBrandLabel(ds.larkAppId),
         });
         cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId).catch((err: any) => {
           logger.warn(`[${t}] Failed to deliver adopt_preamble to Lark: ${err.message}`);
@@ -1309,8 +1310,9 @@ function deliverFinalOutput(
             assistantText: msg.content,
             assistantLabel: getCliDisplayName(effectiveCliId),
             recipientOpenId,
+            brand: resolveBrandLabel(ds.larkAppId),
           })
-        : buildMarkdownCard(msg.content, recipientOpenId);
+        : buildMarkdownCard(msg.content, recipientOpenId, resolveBrandLabel(ds.larkAppId));
       await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
       ds.lastBridgeEmittedUuid = msg.lastUuid;
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
