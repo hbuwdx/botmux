@@ -45,14 +45,38 @@ function hasTeamRoleFile(dataDir: string, larkAppId: string): boolean {
   return existsSync(join(dataDir, 'team-roles', `${larkAppId}.md`));
 }
 
+/** A currently-running bot from the live daemon registry (authoritative for
+ *  "what's running" — unlike bots-info.json which is a racy, probe-lagged file). */
+export interface LiveBot { larkAppId: string; botName?: string | null; cliId?: string }
+
 /**
  * @param configOrder optional list of larkAppIds in bots.json (config) order;
- *   when given, the roster is sorted to match it (and the personal dashboard),
- *   with any bot not in the config kept after, in bots-info.json order.
+ *   when given, the roster is sorted to match it (and the personal dashboard).
+ * @param liveBots optional live daemon-registry bots. When given, the roster's
+ *   bot set is THESE (authoritative — fixes an empty/stale bots-info.json
+ *   showing no bots even though daemons are running), enriched with cliId from
+ *   bots-info.json by larkAppId. When omitted, falls back to bots-info.json.
  */
-export function buildTeamRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID, configOrder?: string[]): TeamRoster {
+export function buildTeamRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID, configOrder?: string[], liveBots?: LiveBot[]): TeamRoster {
   const team = getTeam(dataDir, teamId) ?? getDefaultTeam(dataDir);
-  let entries = readBotsInfo(dataDir);
+  const info = readBotsInfo(dataDir);
+  let entries: BotInfoEntry[];
+  if (liveBots && liveBots.length) {
+    // Live registry is the source of truth; enrich cliId/openId/name from
+    // bots-info.json (which carries cliId — the registry doesn't) by larkAppId.
+    const byId = new Map(info.map(e => [e.larkAppId, e]));
+    entries = liveBots.map(lb => {
+      const ex = byId.get(lb.larkAppId);
+      return {
+        larkAppId: lb.larkAppId,
+        botOpenId: ex?.botOpenId ?? null,
+        botName: lb.botName ?? ex?.botName ?? null,
+        cliId: lb.cliId ?? ex?.cliId ?? '',
+      };
+    });
+  } else {
+    entries = info;
+  }
   if (configOrder && configOrder.length) {
     const rank = new Map(configOrder.map((id, i) => [id, i]));
     const at = (id: string) => rank.has(id) ? (rank.get(id) as number) : Number.MAX_SAFE_INTEGER;

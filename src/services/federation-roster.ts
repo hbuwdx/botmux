@@ -6,7 +6,7 @@
  *
  * Pure read from `{dataDir}` files — testable, no Lark API.
  */
-import { buildTeamRoster } from './team-roster.js';
+import { buildTeamRoster, type LiveBot } from './team-roster.js';
 import { listFederatedDeployments } from './federation-store.js';
 import { getDeploymentIdentity } from './deployment-identity.js';
 import { getTeam, getDefaultTeam, DEFAULT_TEAM_ID } from './team-store.js';
@@ -46,10 +46,10 @@ export interface AggregatedRoster {
 }
 
 /** Hub's local bots + all member deployments' bots, tagged + grouped by deployment. */
-export function buildFederatedRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID, configOrder?: string[], now: number = Date.now()): AggregatedRoster {
+export function buildFederatedRoster(dataDir: string, teamId: string = DEFAULT_TEAM_ID, configOrder?: string[], now: number = Date.now(), liveBots?: LiveBot[]): AggregatedRoster {
   const team = getTeam(dataDir, teamId) ?? getDefaultTeam(dataDir);
   const localId = getDeploymentIdentity(dataDir);
-  const local = buildTeamRoster(dataDir, teamId, configOrder);
+  const local = buildTeamRoster(dataDir, teamId, configOrder, liveBots);
 
   const deployments: AggregatedDeployment[] = [
     { id: localId.deploymentId, name: localId.name, local: true, botCount: local.bots.length, stale: false },

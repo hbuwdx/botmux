@@ -59,6 +59,25 @@ describe('buildTeamRoster', () => {
     expect(buildTeamRoster(dataDir).bots).toEqual([]);
   });
 
+  it('liveBots is authoritative — shows running bots even when bots-info.json is empty', () => {
+    // bots-info.json empty (e.g. probe lagged / write race) but daemons are running
+    writeBotsInfo([]);
+    const r = buildTeamRoster(dataDir, DEFAULT_TEAM_ID, undefined, [
+      { larkAppId: 'cli_run1', botName: 'Run1' },
+      { larkAppId: 'cli_run2', botName: 'Run2', cliId: 'codex' },
+    ]);
+    expect(r.bots.map(b => b.larkAppId).sort()).toEqual(['cli_run1', 'cli_run2']);
+    expect(r.bots.find(b => b.larkAppId === 'cli_run2')!.cliId).toBe('codex');
+  });
+
+  it('liveBots enriches cliId from bots-info.json by larkAppId', () => {
+    writeBotsInfo([{ larkAppId: 'cli_a', botOpenId: null, botName: 'A-info', cliId: 'claude' }]);
+    const r = buildTeamRoster(dataDir, DEFAULT_TEAM_ID, undefined, [{ larkAppId: 'cli_a', botName: 'A-live' }]);
+    const a = r.bots.find(b => b.larkAppId === 'cli_a')!;
+    expect(a.name).toBe('A-live');  // live name preferred
+    expect(a.cliId).toBe('claude'); // cliId from bots-info (registry lacks it)
+  });
+
   it('sorts to configOrder (bots.json order); unknown bots kept after in original order', () => {
     // bots-info.json registration order ≠ bots.json config order
     writeBotsInfo([

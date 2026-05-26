@@ -171,6 +171,13 @@ async function proxyToDaemon(
  *  selected bots, proxy to its /api/groups/create, invite the requesting user.
  *  Surfaces invalidBotIds/invalidUserIds so the UI never implies a non-added
  *  bot/user joined. */
+/** Live daemon-registry bots — authoritative source for THIS deployment's
+ *  bots (cliId added from bots-info.json downstream). Fixes an empty/stale
+ *  bots-info.json hiding running bots from the team roster / federation. */
+function liveBots(): { larkAppId: string; botName: string }[] {
+  return registry.list().map(d => ({ larkAppId: d.larkAppId, botName: d.botName }));
+}
+
 async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string; ownerUnionIds?: string[] }): Promise<{
   ok: boolean; chatId?: string; shareLink?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; invalidOwnerUnionIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
 }> {
@@ -332,7 +339,7 @@ const server = createServer(async (req, res) => {
     // Federation HUB endpoints — cross-deployment, self-authed by invite code /
     // syncToken, so mounted before the token gate (like webhook/team routes).
     // createTeamGroup injected for the delegate-group path (hub→spoke 拉群).
-    if (await handleFederationApi(req, res, url, { createTeamGroup })) {
+    if (await handleFederationApi(req, res, url, { createTeamGroup, liveBots })) {
       return;
     }
 
@@ -405,7 +412,7 @@ const server = createServer(async (req, res) => {
     }
 
     // Federation SPOKE endpoints (owner actions) — token-gated above.
-    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup })) {
+    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup, liveBots })) {
       return;
     }
 
@@ -897,7 +904,7 @@ server.listen(config.dashboard.port, config.dashboard.host, () => {
 // Federation: periodically push this deployment's bots + heartbeat to every hub
 // it has joined (best-effort; no-op when not federated). Keeps remote rosters fresh.
 const federationSync = setInterval(() => {
-  syncAllMemberships(config.session.dataDir).catch(() => { /* best-effort */ });
+  syncAllMemberships(config.session.dataDir, fetch, liveBots()).catch(() => { /* best-effort */ });
 }, 2 * 60 * 1000);
 federationSync.unref();
 

@@ -17,7 +17,7 @@ import { writeFileSync, readFileSync, mkdirSync, existsSync, unlinkSync } from '
 import { join, dirname } from 'node:path';
 import { config } from '../config.js';
 import { jsonRes } from './workflow-api.js';
-import { buildTeamRoster } from '../services/team-roster.js';
+import { buildTeamRoster, type LiveBot } from '../services/team-roster.js';
 import { buildFederatedRoster } from '../services/federation-roster.js';
 import { getDeploymentIdentity, setDeploymentName } from '../services/deployment-identity.js';
 import { addMembership, listMemberships, removeMembership } from '../services/federation-membership-store.js';
@@ -92,9 +92,10 @@ function botConfigOrder(): string[] {
   try { return loadBotConfigs().map(b => b.larkAppId); } catch { return []; }
 }
 
-/** This deployment's bots, in the shape the hub federates (bots.json order). */
-function localBots(dataDir: string): FederatedBot[] {
-  return buildTeamRoster(dataDir).bots.map(b => ({
+/** This deployment's bots, in the shape the hub federates (bots.json order).
+ *  Prefer the live daemon registry (authoritative) over bots-info.json. */
+function localBots(dataDir: string, live?: LiveBot[]): FederatedBot[] {
+  return buildTeamRoster(dataDir, undefined, undefined, live).bots.map(b => ({
     larkAppId: b.larkAppId,
     botName: b.name,
     cliId: b.cliId,
@@ -108,8 +109,8 @@ function localBots(dataDir: string): FederatedBot[] {
 }
 
 /** Push this deployment's current bots to every joined hub. Best-effort. */
-export async function syncAllMemberships(dataDir: string, fetcher: Fetcher = fetch): Promise<{ synced: number; failed: number }> {
-  const bots = localBots(dataDir);
+export async function syncAllMemberships(dataDir: string, fetcher: Fetcher = fetch, live?: LiveBot[]): Promise<{ synced: number; failed: number }> {
+  const bots = localBots(dataDir, live);
   let synced = 0, failed = 0;
   for (const m of listMemberships(dataDir)) {
     try {
@@ -127,6 +128,10 @@ export async function syncAllMemberships(dataDir: string, fetcher: Fetcher = fet
 export interface FederationSpokeDeps {
   dataDir?: string;
   fetcher?: Fetcher;
+  /** Live daemon-registry bots (injected by dashboard.ts) — authoritative source
+   *  for THIS deployment's bots, so an empty/stale bots-info.json never hides
+   *  running bots from the team roster / federation sync. */
+  liveBots?: () => LiveBot[];
   /** Injected by dashboard.ts — picks a local online creator + proxies to its
    *  daemon's /api/groups/create (federated bots are added by larkAppId). */
   createTeamGroup?: (args: { name: string; larkAppIds: string[]; ownerUnionIds?: string[] }) => Promise<{
@@ -148,13 +153,14 @@ export async function handleFederationSpokeApi(
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const fetcher = deps.fetcher ?? fetch;
   const method = req.method ?? 'GET';
+  const live = deps.liveBots?.(); // live registry bots (authoritative over bots-info.json)
 
   // Edit a LOCAL bot's capability label / team role (federated bots are read-only
   // — they're owned by another deployment and synced over). Local bots only.
   if (localBotEdit) {
     const larkAppId = decodeURIComponent(localBotEdit[1]);
     const field = localBotEdit[2];
-    const localIds = new Set(buildTeamRoster(dataDir).bots.map(b => b.larkAppId));
+    const localIds = new Set(buildTeamRoster(dataDir, undefined, undefined, live).bots.map(b => b.larkAppId));
     if (!localIds.has(larkAppId)) { jsonRes(res, 404, { ok: false, error: 'not_a_local_bot' }); return true; }
     if (field === 'role' && method === 'GET') {
       const fp = teamRolePath(dataDir, larkAppId);
@@ -191,7 +197,7 @@ export async function handleFederationSpokeApi(
     const name = (String(body?.name ?? '').trim()) || '协作群';
     if (larkAppIds.length === 0) { jsonRes(res, 400, { ok: false, error: 'no_bots_selected' }); return true; }
     // Only bots on the aggregated roster (local + federated) — block bad ids.
-    const roster = buildFederatedRoster(dataDir, DEFAULT_TEAM_ID);
+    const roster = buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, undefined, undefined, live);
     const rosterById = new Map(roster.bots.map(b => [b.larkAppId, b]));
     const unknown = larkAppIds.filter(id => !rosterById.has(id));
     if (unknown.length) { jsonRes(res, 400, { ok: false, error: 'unknown_bot', unknown }); return true; }
@@ -242,7 +248,7 @@ export async function handleFederationSpokeApi(
     ensureDefaultTeam(dataDir);
     const me = getDeploymentIdentity(dataDir);
     const suggestedHubUrl = `http://${config.dashboard.externalHost}:${config.dashboard.port}`;
-    jsonRes(res, 200, { ok: true, deployment: me, suggestedHubUrl, ...buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, botConfigOrder()) });
+    jsonRes(res, 200, { ok: true, deployment: me, suggestedHubUrl, ...buildFederatedRoster(dataDir, DEFAULT_TEAM_ID, botConfigOrder(), undefined, live) });
     return true;
   }
   if (path === '/api/team/local-invite' && method === 'POST') {
@@ -278,7 +284,7 @@ export async function handleFederationSpokeApi(
       hubRes = await fetchWithTimeout(fetcher, `${hubUrl}/api/federation/join`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ inviteCode, deployment: { deploymentId: me.deploymentId, name: me.name, bots: localBots(dataDir), callbackUrl, delegationToken } }),
+        body: JSON.stringify({ inviteCode, deployment: { deploymentId: me.deploymentId, name: me.name, bots: localBots(dataDir, live), callbackUrl, delegationToken } }),
       });
     } catch (e) {
       const he = hubError(e);
@@ -316,7 +322,7 @@ export async function handleFederationSpokeApi(
 
   // Manually push bots + heartbeat to all joined hubs.
   if (path === '/api/team/sync-remote' && method === 'POST') {
-    const r = await syncAllMemberships(dataDir, fetcher);
+    const r = await syncAllMemberships(dataDir, fetcher, live);
     jsonRes(res, 200, { ok: true, ...r });
     return true;
   }

@@ -20,7 +20,7 @@ import {
 } from '../services/federation-store.js';
 import { buildFederatedRoster } from '../services/federation-roster.js';
 import { findMembershipByDelegationToken } from '../services/federation-membership-store.js';
-import { buildTeamRoster } from '../services/team-roster.js';
+import { buildTeamRoster, type LiveBot } from '../services/team-roster.js';
 import { getDeploymentIdentity } from '../services/deployment-identity.js';
 
 const MAX_BOTS = 200;
@@ -91,6 +91,9 @@ function sanitizeBots(input: unknown): FederatedBot[] {
 
 export interface FederationApiDeps {
   dataDir?: string;
+  /** Live daemon-registry bots (authoritative over bots-info.json) for the
+   *  delegate-group local-bot guard. */
+  liveBots?: () => LiveBot[];
   /** Injected by dashboard.ts — used when a HUB delegates 拉群 to THIS spoke
    *  (we create the chat with one of OUR local online bots as creator). */
   createTeamGroup?: (args: { name: string; larkAppIds: string[]; ownerUnionIds?: string[] }) => Promise<{
@@ -193,7 +196,7 @@ export async function handleFederationApi(
     if (larkAppIds.length > MAX_BOTS || ownerUnionIds.length > MAX_OWNERS) { jsonRes(res, 400, { ok: false, error: 'too_many' }); return true; }
     // Guardrail: the delegation must involve at least one of OUR local bots
     // (otherwise it's unrelated to this deployment — refuse to act as creator).
-    const localIds = new Set(buildTeamRoster(dataDir).bots.map(b => b.larkAppId));
+    const localIds = new Set(buildTeamRoster(dataDir, undefined, undefined, deps.liveBots?.()).bots.map(b => b.larkAppId));
     if (!larkAppIds.some(id => localIds.has(id))) { jsonRes(res, 400, { ok: false, error: 'no_local_bot' }); return true; }
     // Idempotency: replays of the same {token, requestId} return the first result.
     const requestId = String(body?.requestId ?? '').trim();
