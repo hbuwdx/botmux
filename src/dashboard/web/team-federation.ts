@@ -39,6 +39,7 @@ let remoteTeams: Team[] = [];  // teams this deployment joined
 let myDeploymentId = '';
 let suggestedHubUrl = '';
 const pickedByTeam = new Map<string, Set<string>>();
+const gnameByTeam = new Map<string, string>(); // group-name draft per team — survives renderTeams() re-render
 const expandedTeams = new Set<string>(); // default empty → all teams collapsed; click a team header to expand
 const expandedDeps = new Set<string>(); // `${team.key}::${dep.id}` — default empty → deployment groups collapsed too
 
@@ -138,7 +139,7 @@ function renderTeamBody(t: Team, filtered: RosterBot[]): string {
   }
   if (!h) h = '<p class="muted" style="margin:8px 0 0">没有符合条件的机器人。</p>';
   h += `<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">`
-    + `<input class="tf-gname" data-tk="${escapeHtml(t.key)}" placeholder="群名（如：跨团队排障）" style="min-width:200px">`
+    + `<input class="tf-gname" data-tk="${escapeHtml(t.key)}" value="${escapeHtml(gnameByTeam.get(t.key) || '')}" placeholder="群名（如：跨团队排障）" style="min-width:200px">`
     + `<button class="tf-grp primary" data-tk="${escapeHtml(t.key)}">把勾选的机器人拉一个群</button>`
     + `<span class="muted" style="font-size:13px">勾选机器人 → 拉到一个飞书群（自动含 owner）</span>`
     + `<span class="tf-gout" data-tk="${escapeHtml(t.key)}" style="font-size:13px;display:block;flex-basis:100%"></span></div>`;
@@ -186,6 +187,9 @@ function wireTeams(): void {
   el.querySelectorAll<HTMLInputElement>('.tf-pick').forEach(cb => {
     cb.onchange = () => { const s = pickedSet(cb.dataset.tk!); if (cb.checked) s.add(cb.dataset.app!); else s.delete(cb.dataset.app!); };
   });
+  el.querySelectorAll<HTMLInputElement>('.tf-gname').forEach(inp => {
+    inp.oninput = () => { gnameByTeam.set(inp.dataset.tk!, inp.value); };
+  });
   el.querySelectorAll<HTMLInputElement>('.tf-cap').forEach(inp => {
     inp.onchange = async () => {
       const app = inp.dataset.app!, valv = inp.value;
@@ -214,7 +218,7 @@ function wireTeams(): void {
         ? await jpost('/api/team/federated-group', { name, larkAppIds: apps, teamId: t.teamId })
         : await jpost('/api/team/remote-group', { hubUrl: t.hubUrl, teamId: t.teamId, name, larkAppIds: apps });
       renderGroupResult(out, r.body as any, r.status);
-      if ((r.body as any)?.ok) { pickedSet(k).clear(); if (t.kind === 'local') loadLocal(); }
+      if ((r.body as any)?.ok) { pickedSet(k).clear(); gnameByTeam.delete(k); if (t.kind === 'local') loadLocal(); }
     };
   });
 }
@@ -288,7 +292,7 @@ async function loadRemote(): Promise<void> {
 
 export function renderTeamFederationPage(root: HTMLElement): void {
   root.innerHTML = homeHtml();
-  pickedByTeam.clear(); expandedTeams.clear(); expandedDeps.clear();
+  pickedByTeam.clear(); gnameByTeam.clear(); expandedTeams.clear(); expandedDeps.clear();
   ['tf-search', 'tf-cli', 'tf-fcap', 'tf-frole'].forEach(id => { const el = $(id); el.oninput = renderTeams; el.onchange = renderTeams; });
   $('tf-modal-cancel').onclick = () => { $('tf-modal').style.display = 'none'; };
   $('tf-modal-save').onclick = async () => {
