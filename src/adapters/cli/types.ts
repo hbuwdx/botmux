@@ -152,11 +152,9 @@ export interface CliAdapter {
    *  queued messages immediately instead of waiting for idle detection.
    *  Only set for CLIs whose input handling is known to tolerate this —
    *  Claude Code buffers input internally and processes it after the current
-   *  turn; CoCo (0.120.32+) parks it in its own TUI queue and dequeues it when
-   *  the current turn ends. NOTE: for the structured (codex/coco) bridge, the
-   *  worker additionally requires the CLI not be Codex — Codex's rollout
-   *  attribution hasn't been validated for type-ahead, so even an adapter that
-   *  set this flag would stay serial there. */
+   *  turn; CoCo (0.120.32+) and Codex (0.134.0+) park it in their own TUI queue
+   *  and dequeue it when the current turn ends, writing the transcript user
+   *  event only at dequeue time so the bridge's attribution stays correct. */
   readonly supportsTypeAhead?: boolean;
 
   /** Whether CLI uses alternate screen buffer */

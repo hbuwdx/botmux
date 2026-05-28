@@ -466,7 +466,11 @@ describe('supportsTypeAhead flag', () => {
     expect(createCocoAdapter('/bin/coco').supportsTypeAhead).toBe(true);
   });
 
-  it.each(PLAIN_ADAPTERS)('%s: undefined (default behavior)', (_name, adapter) => {
+  it('codex: true (0.134.0+ parks submit-while-busy, writes rollout user event at dequeue time)', () => {
+    expect(createCodexAdapter('/bin/codex').supportsTypeAhead).toBe(true);
+  });
+
+  it.each(PLAIN_ADAPTERS.filter(([name]) => name !== 'codex'))('%s: undefined (default behavior)', (_name, adapter) => {
     expect(adapter.supportsTypeAhead).toBeUndefined();
   });
 });

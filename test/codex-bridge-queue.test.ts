@@ -90,15 +90,17 @@ describe('CodexBridgeQueue', () => {
     expect(ready.map(t => t.turnId)).toEqual(['t2']);
   });
 
-  it('CoCo type-ahead: both turns marked upfront, interleaved events attribute in order', () => {
-    // Models the CoCo type-ahead path: the worker writes msg1 AND msg2 to the
-    // PTY back-to-back (type-ahead), so both turns are marked before either is
-    // processed. CoCo parks msg2 in its TUI queue and writes its events.jsonl
-    // user event only at dequeue time, so the transcript the bridge ingests is
-    // strictly interleaved (user1 → asst1 → user2 → asst2). This is exactly
-    // what keeps the single-`collecting` pointer correct. Marks land at t=100
-    // while the user events arrive much later (dequeue time) — the tooOld gate
-    // (ts < markTime - 5s) must NOT trip here because events come AFTER marks.
+  it('CoCo/Codex type-ahead: both turns marked upfront, interleaved events attribute in order', () => {
+    // Models the CoCo/Codex type-ahead path: the worker writes msg1 AND msg2 to
+    // the PTY back-to-back (type-ahead), so both turns are marked before either
+    // is processed. CoCo/Codex park msg2 in their TUI queue and write its
+    // transcript (events.jsonl / rollout) user event only at dequeue time, so
+    // the transcript the bridge ingests is strictly interleaved (user1 → asst1
+    // → user2 → asst2). This is exactly what keeps the single-`collecting`
+    // pointer correct. Marks land at t=100 while the user events arrive much
+    // later (dequeue time) — the tooOld gate (ts < markTime - 5s) must NOT trip
+    // here because events come AFTER marks. (Codex behaviour verified
+    // empirically on codex-cli 0.134.0.)
     const q = new CodexBridgeQueue();
     q.mark('t1', 'first prompt', 100);
     q.mark('t2', 'second prompt', 100);  // type-ahead: marked ~immediately

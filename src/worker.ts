@@ -2390,21 +2390,22 @@ async function flushPending(): Promise<void> {
   // so the gate window is correct), Claude bridge can run with type-ahead
   // again.
   //
-  // CoCo (0.120.32+) also tolerates type-ahead, but for a different reason
-  // than Claude: it parks a submit-while-busy message in its own TUI queue
-  // ("↑ Press up to edit queued messages") and only writes the user event to
-  // events.jsonl when it DEQUEUES and starts processing it — i.e. AFTER the
-  // previous turn's assistant_final. So the transcript stays strictly
-  // interleaved (user1 → asst1 → user2 → asst2) and CodexBridgeQueue's
-  // single-`collecting` attribution stays correct without the queued_command
+  // CoCo (0.120.32+) and Codex (0.134.0+) also tolerate type-ahead, but for a
+  // different reason than Claude: they park a submit-while-busy message in the
+  // TUI's own queue (CoCo: "↑ Press up to edit queued messages"; Codex:
+  // "Messages to be submitted after next tool call") and only write the user
+  // event to the transcript (events.jsonl / rollout) when they DEQUEUE and
+  // start processing it — i.e. AFTER the previous turn's assistant_final. So
+  // the transcript stays strictly interleaved (user1 → asst1 → user2 → asst2)
+  // and CodexBridgeQueue's single-`collecting` attribution stays correct
+  // (with the markTimeMs dequeue-time override) without the queued_command
   // upgrade Claude needed. (The submit log history.jsonl, which the adapter's
   // writeInput verification polls, IS written at submit time even for a queued
-  // message, so verification doesn't spuriously fail either.) Only the Codex
-  // rollout bridge stays serial — its queue hasn't been validated for the
-  // back-to-back user_message ordering that type-ahead can produce there.
+  // message, so verification doesn't spuriously fail either.) Both behaviours
+  // verified empirically — Codex on codex-cli 0.134.0.
   const claudeBridgeActive = !!bridgeJsonlPath && !lastInitConfig?.adoptMode;
   const codexBridgeActive = codexBridgeFallbackActive();
-  const typeAheadAllowed = cliAdapter.supportsTypeAhead && !structuredBridgeIsCodex();
+  const typeAheadAllowed = cliAdapter.supportsTypeAhead;
   if (!isPromptReady && !typeAheadAllowed) return;
 
   isFlushing = true;
@@ -2471,18 +2472,13 @@ async function flushPending(): Promise<void> {
       if (result && result.submitted === false && backend) {
         scheduleSubmitFailureNotify(msg, result.recheck, '会话 JSONL', bridgeTurnId, result.failureReason, turnSeq);
       }
-      // Codex rollout bridge: stop after one writeInput per idle cycle.
-      // Codex's bridge queue doesn't yet attribute queued_command-equivalents,
-      // so type-ahead'd submits would have their assistant text dropped or
-      // mis-attributed. We resume on the next idle, by which point Codex
-      // has finished and the next message can be a normal user_message
-      // submit. Claude bridge and CoCo no longer take this break — Claude's
-      // BridgeTurnQueue handles `attachment(queued_command)` events
-      // identically to `role:user`, and CoCo parks queued submits in its own
-      // TUI queue (writing the events.jsonl user event only at dequeue time),
-      // so both keep the transcript interleaved and attribute correctly. We
-      // WANT CoCo to drain all pending here so they land in its TUI queue.
-      if (structuredBridgeIsCodex() && pendingMessages.length > 0) break;
+      // All structured bridges now drain every pending message in one flush:
+      // Claude's BridgeTurnQueue handles `attachment(queued_command)` events
+      // identically to `role:user`, and CoCo/Codex park queued submits in
+      // their own TUI queue (writing the transcript user event only at dequeue
+      // time), so all keep the transcript interleaved and attribute correctly.
+      // We WANT them to drain all pending here so the extras land in the TUI
+      // queue rather than waiting for the next idle.
     }
   } finally {
     isFlushing = false;
@@ -2505,12 +2501,12 @@ function sendToPty(content: string): void {
     // Tear down the prompt card so the user doesn't see stale options.
     send({ type: 'tui_prompt_resolved', selectedText: 'user-override' });
   }
-  // See flushPending: only the Codex rollout bridge still serialises
-  // type-ahead. Claude attributes `attachment(queued_command)` events
-  // identically to `role:user`, and CoCo parks queued submits in its own TUI
-  // queue, so both land type-ahead'd submits in the right turn — only Codex
-  // needs the entry path gated.
-  const typeAheadAllowed = cliAdapter.supportsTypeAhead && !structuredBridgeIsCodex();
+  // See flushPending: type-ahead adapters flush even while the CLI is busy.
+  // Claude attributes `attachment(queued_command)` events identically to
+  // `role:user`, and CoCo/Codex park queued submits in their own TUI queue
+  // (writing the transcript user event only at dequeue time), so all land
+  // type-ahead'd submits in the right turn.
+  const typeAheadAllowed = cliAdapter.supportsTypeAhead;
   if (isPromptReady || isFlushing || typeAheadAllowed) {
     log(`Writing to PTY: "${content.substring(0, 80)}"`);
     flushPending();  // fire-and-forget async; no-op if already flushing

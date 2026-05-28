@@ -217,6 +217,17 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     completionPattern: undefined,
     readyPattern: /›|\d+% left/,  // › for input box, or status bar pattern (e.g. "97% left")
     systemHints: BOTMUX_SHELL_HINTS,
+    // Codex 0.134.0+ accepts a message while the current turn is still running:
+    // it parks it ("Messages to be submitted after next tool call") and submits
+    // it once the current turn finishes. Like CoCo, the queued message's rollout
+    // user event is written only at DEQUEUE time, so the transcript the bridge
+    // fallback reads stays interleaved (user1 → asst1 → user2 → asst2) and
+    // CodexBridgeQueue's single-`collecting` attribution (plus the markTimeMs
+    // dequeue-time override) stays correct. The submit log history.jsonl IS
+    // written at submit time even for a queued message, so writeInput's
+    // verification confirms the submit immediately and never spuriously reports
+    // a send failure mid-turn. Verified empirically on codex-cli 0.134.0.
+    supportsTypeAhead: true,
     altScreen: false,   // --no-alt-screen disables alternate screen
     modelChoices: ['gpt-5', 'gpt-5-codex', 'o3', 'o3-mini'],
   };
