@@ -3155,6 +3155,10 @@ body{display:flex;flex-direction:column}
 #toolbar button:active{background:#7aa2f7;color:#1a1b26}
 #terminal{flex:1;min-height:0}
 #terminal .xterm{height:100%}
+/* Real scroll container is xterm's own viewport — kill iOS rubber-band bounce
+   and momentum here (not just on body), and reserve gestures for pinch-zoom so
+   single-finger drag is driven manually by the touch handler below. */
+#terminal .xterm-viewport{overscroll-behavior:none;-webkit-overflow-scrolling:auto;touch-action:pinch-zoom}
 #status{position:fixed;top:8px;right:12px;z-index:10;font:12px monospace;
   color:#565f89;background:#1a1b26cc;padding:2px 8px;border-radius:4px}
 #status.ok{color:#9ece6a}
@@ -3184,7 +3188,6 @@ body{display:flex;flex-direction:column}
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0/lib/addon-web-links.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0/lib/addon-unicode11.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
 <script>
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
 if(isTouch)document.getElementById('vp').content='width=1100,viewport-fit=cover';
@@ -3312,29 +3315,37 @@ if(isTouch&&hasToken){
   }
 }
 
-// ── Two-finger touch scroll via Hammer.js (mobile) ──
-// Hammer distinguishes Pan (parallel drag) from Pinch (spread/squeeze)
-// internally.  Pan with pointers:2 only fires for genuine two-finger scroll.
-if(isTouch&&typeof Hammer!=='undefined'){
-  var mc=new Hammer.Manager(document.getElementById('terminal'),{touchAction:'auto',inputClass:Hammer.TouchInput});
-  var pinch=new Hammer.Pinch();
-  var pan=new Hammer.Pan({pointers:2,direction:Hammer.DIRECTION_VERTICAL,threshold:4});
-  pinch.recognizeWith(pan);
-  mc.add([pinch,pan]);
-  var _panPrevY=0,_panAcc=0;
-  mc.on('panstart',function(ev){_panPrevY=ev.center.y;_panAcc=0});
-  mc.on('panmove',function(ev){
-    var d=ev.center.y-_panPrevY;
-    _panPrevY=ev.center.y;
-    // Accumulate sub-pixel deltas; fire 1 wheel event per ~85px
-    // (tmux scrolls ~5 lines per wheel, line height ~17px)
-    _panAcc+=d;
-    var step=85;
-    while(Math.abs(_panAcc)>=step){
-      _sendScroll(_panAcc>0,1);
-      _panAcc-=(_panAcc>0?step:-step);
+// ── Single-finger touch scroll (mobile) ──
+// One finger dragging scrolls the terminal, following the finger 1:1 with no
+// elastic bounce or momentum jank.  Two+ fingers are left to the browser so
+// pinch-zoom still works for reading small text.
+//   • pipe / non-tmux: drive .xterm-viewport.scrollTop directly → pixel-smooth.
+//   • legacy tmux copy-mode (scrollback lives in tmux, not xterm): translate
+//     the drag into wheel sequences via _sendScroll, accumulating per line.
+if(isTouch){
+  var _tmuxScroll=${isTmuxMode && !isPipeMode};
+  var _vp=document.querySelector('#terminal .xterm-viewport');
+  var _tEl=document.getElementById('terminal');
+  var _tLastY=0,_tActive=false,_tAcc=0;
+  _tEl.addEventListener('touchstart',function(e){
+    if(e.touches.length!==1){_tActive=false;return;}  // multi-touch → let browser pinch-zoom
+    _tActive=true;_tLastY=e.touches[0].clientY;_tAcc=0;
+  },{passive:true});
+  _tEl.addEventListener('touchmove',function(e){
+    if(!_tActive||e.touches.length!==1)return;
+    var y=e.touches[0].clientY,dy=y-_tLastY;_tLastY=y;
+    if(_tmuxScroll){
+      _tAcc+=dy;var step=22;  // ~1.3 lines per wheel-equiv; smaller = smoother
+      while(Math.abs(_tAcc)>=step){_sendScroll(_tAcc>0,1);_tAcc-=(_tAcc>0?step:-step);}
+    }else if(_vp){
+      _vp.scrollTop-=dy;  // drag down → reveal older content; scrollTop clamps, no bounce
+    }else{
+      term.scrollLines(dy>0?-1:1);
     }
-  });
+    e.preventDefault();  // hard-kill native scroll/bounce/momentum
+  },{passive:false});
+  _tEl.addEventListener('touchend',function(){_tActive=false});
+  _tEl.addEventListener('touchcancel',function(){_tActive=false});
 }
 </script>
 </body>
