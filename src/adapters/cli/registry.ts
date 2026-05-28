@@ -14,6 +14,7 @@ import { createOpenCodeAdapter } from './opencode.js';
 import { createAntigravityAdapter } from './antigravity.js';
 import { createMtrAdapter } from './mtr.js';
 import { createHermesAdapter } from './hermes.js';
+import { createMiraAdapter } from './mira.js';
 
 /** Resolve a command name to its absolute path via shell `which`.
  *  Tries login shell first (-lc), then interactive shell (-ic) for tools
@@ -59,7 +60,7 @@ export async function createCliAdapter(id: CliId, pathOverride?: string): Promis
   return adapter;
 }
 
-export { createClaudeCodeAdapter, createAidenAdapter, createCocoAdapter, createCodexAdapter, createCodexAppAdapter, createCursorAdapter, createGeminiAdapter, createOpenCodeAdapter, createAntigravityAdapter, createMtrAdapter, createHermesAdapter };
+export { createClaudeCodeAdapter, createAidenAdapter, createCocoAdapter, createCodexAdapter, createCodexAppAdapter, createCursorAdapter, createGeminiAdapter, createOpenCodeAdapter, createAntigravityAdapter, createMtrAdapter, createHermesAdapter, createMiraAdapter };
 
 /** Synchronous version for use in worker process. */
 export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapter {
@@ -75,6 +76,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapt
     case 'antigravity': return createAntigravityAdapter(pathOverride);
     case 'mtr': return createMtrAdapter(pathOverride);
     case 'hermes': return createHermesAdapter(pathOverride);
+    case 'mira': return createMiraAdapter(pathOverride);
     default: throw new Error(`Unknown CLI adapter: ${id}`);
   }
 }

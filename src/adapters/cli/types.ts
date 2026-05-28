@@ -170,4 +170,4 @@ export interface CliAdapter {
   readonly modelChoices?: readonly string[];
 }
 
-export type CliId = 'claude-code' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes';
+export type CliId = 'claude-code' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira';

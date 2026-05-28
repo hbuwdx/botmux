@@ -26,13 +26,14 @@ import { createOpenCodeAdapter } from '../src/adapters/cli/opencode.js';
 import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
 import { createMtrAdapter, mtrSessionIdForBotmuxSession } from '../src/adapters/cli/mtr.js';
 import { createHermesAdapter } from '../src/adapters/cli/hermes.js';
+import { createMiraAdapter } from '../src/adapters/cli/mira.js';
 import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -51,7 +52,7 @@ describe('createCliAdapterSync factory', () => {
 
   it.each(ALL_CLI_IDS)('adapter for "%s" has resolvedBin set', (id) => {
     const adapter = createCliAdapterSync(id, `/opt/${id}`);
-    if (id === 'codex-app') expect(adapter.resolvedBin).toBe(process.execPath);
+    if (id === 'codex-app' || id === 'mira') expect(adapter.resolvedBin).toBe(process.execPath);
     else expect(adapter.resolvedBin).toBe(`/opt/${id}`);
   });
 });
@@ -235,6 +236,30 @@ describe('codex-app buildArgs', () => {
     });
     expect(args).toContain('--thread-id');
     expect(args).toContain('thread-123');
+  });
+});
+
+describe('mira buildArgs', () => {
+  const adapter = createMiraAdapter();
+
+  it('spawns the node runner', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-mira', resume: false, model: 'kimi-k2.5' });
+    expect(adapter.resolvedBin).toBe(process.execPath);
+    expect(args[0]).toMatch(/mira-runner\.js$/);
+    expect(args).toContain('--session-id');
+    expect(args).toContain('sess-mira');
+    expect(args).not.toContain('--model');
+    expect(args).not.toContain('kimi-k2.5');
+  });
+
+  it('resumes with the persisted Mira session id', () => {
+    const args = adapter.buildArgs({
+      sessionId: 'sess-mira',
+      resume: true,
+      resumeSessionId: 'mira-session-123',
+    });
+    expect(args).toContain('--mira-session-id');
+    expect(args).toContain('mira-session-123');
   });
 });
 
@@ -472,6 +497,10 @@ describe('completionPattern', () => {
     expect(createCodexAppAdapter('/bin/codex').completionPattern).toBeUndefined();
   });
 
+  it('mira has no completionPattern', () => {
+    expect(createMiraAdapter().completionPattern).toBeUndefined();
+  });
+
   it('gemini has no completionPattern', () => {
     expect(createGeminiAdapter('/bin/gemini').completionPattern).toBeUndefined();
   });
@@ -521,6 +550,12 @@ describe('readyPattern', () => {
     expect(adapter.readyPattern!.test('›')).toBe(true);
   });
 
+  it('mira matches runner prompt indicator', () => {
+    const adapter = createMiraAdapter();
+    expect(adapter.readyPattern).toBeDefined();
+    expect(adapter.readyPattern!.test('›')).toBe(true);
+  });
+
   it('aiden has no readyPattern', () => {
     expect(createAidenAdapter('/bin/aiden').readyPattern).toBeUndefined();
   });
@@ -560,6 +595,12 @@ describe('systemHints', () => {
     expect(createCodexAppAdapter('/bin/codex').injectsSessionContext).toBe(true);
   });
 
+  it('mira has empty systemHints (runner injects API instructions)', () => {
+    expect(createMiraAdapter().systemHints).toEqual([]);
+    expect(createMiraAdapter().injectsSessionContext).toBe(true);
+    expect(createMiraAdapter().modelChoices).toBeUndefined();
+  });
+
   const nonClaudeAdapters: Array<[string, () => CliAdapter]> = [
     ['aiden', () => createAidenAdapter('/bin/aiden')],
     ['coco', () => createCocoAdapter('/bin/coco')],
@@ -594,6 +635,7 @@ describe('id property', () => {
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
     ['mtr', () => createMtrAdapter('/bin/mtr')],
     ['hermes', () => createHermesAdapter('/bin/hermes')],
+    ['mira', () => createMiraAdapter()],
   ];
 
   it.each(expected)('adapter id is "%s"', (expectedId, factory) => {
@@ -645,6 +687,10 @@ describe('altScreen property', () => {
   it('hermes does not use alt screen', () => {
     expect(createHermesAdapter('/bin/hermes').altScreen).toBe(false);
   });
+
+  it('mira does not use alt screen', () => {
+    expect(createMiraAdapter().altScreen).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -690,6 +736,11 @@ describe('buildResumeCommand', () => {
   it('codex-app has no copy-paste resume command', () => {
     const a = createCodexAppAdapter('/bin/codex');
     expect(a.buildResumeCommand?.({ sessionId: 'bm-x', cliSessionId: 'thread-1' })).toBeNull();
+  });
+
+  it('mira has no copy-paste resume command', () => {
+    const a = createMiraAdapter();
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-x', cliSessionId: 'mira-session-1' })).toBeNull();
   });
 
   it('gemini does not implement buildResumeCommand (no precise resume)', () => {

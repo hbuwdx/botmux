@@ -67,6 +67,10 @@ describe('getCliDisplayName', () => {
   it('should return "Hermes" for hermes', () => {
     expect(getCliDisplayName('hermes')).toBe('Hermes');
   });
+
+  it('should return "Mira" for mira', () => {
+    expect(getCliDisplayName('mira')).toBe('Mira');
+  });
 });
 
 // ─── buildSessionCard ─────────────────────────────────────────────────────

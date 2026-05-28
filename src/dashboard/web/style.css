@@ -605,6 +605,7 @@ button.primary {
 .cli-opencode    { background: #e7f7ec; color: #176b36; border-color: #bfe8ce; }
 .cli-mtr         { background: #e5f5ff; color: #0f6388; border-color: #b8e2f7; }
 .cli-hermes      { background: #f0f4e4; color: #546b14; border-color: #d9e9a8; }
+.cli-mira        { background: #e8f6f6; color: #12686d; border-color: #b9e4e5; }
 .cli-aiden       { background: #fff7d1; color: #8b6508; border-color: #f7df87; }
 .cli-coco        { background: #e4f7f2; color: #0c695b; border-color: #b7e4d9; }
 .cli-unknown     { background: var(--surface-muted); color: var(--muted); }
@@ -617,6 +618,7 @@ button.primary {
 :root[data-theme="dark"] .cli-opencode,
 :root[data-theme="dark"] .cli-mtr,
 :root[data-theme="dark"] .cli-hermes,
+:root[data-theme="dark"] .cli-mira,
 :root[data-theme="dark"] .cli-aiden,
 :root[data-theme="dark"] .cli-coco {
   background: var(--surface-muted);

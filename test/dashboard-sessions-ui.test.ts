@@ -9,6 +9,7 @@ describe('dashboard sessions filters', () => {
     expect(html).toContain('name="cli"');
     expect(html).toContain('value="codex"');
     expect(html).toContain('value="codex-app"');
+    expect(html).toContain('value="mira"');
     expect(html).toMatch(/value="codex" checked/);
     expect(html).not.toContain('<select');
   });

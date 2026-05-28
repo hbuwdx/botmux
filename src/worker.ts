@@ -87,7 +87,7 @@ const writeToken = randomBytes(16).toString('hex');
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
@@ -2122,6 +2122,7 @@ let trustHandled = false;
 // not pollute the visible terminal. Strip them before xterm rendering and
 // translate them back into worker IPC.
 const CODEX_APP_OSC_PREFIX = '\x1b]777;botmux:';
+const APP_RUNNER_OSC_CLI_IDS = new Set(['codex-app', 'mira']);
 let codexAppOscPending = '';
 
 function decodeCodexAppPayload(payload: string): any | undefined {
@@ -2152,11 +2153,11 @@ function handleCodexAppMarker(body: string): void {
         m.sentAtMs >= startedAtMs && m.sentAtMs <= completedAtMs + 5_000,
       );
       if (sentByModel) {
-        log('Codex App final_output suppressed (model already called botmux send)');
+        log(`${cliName()} final_output suppressed (model already called botmux send)`);
         return;
       }
     }
-    const turnId = typeof payload.turnId === 'string' ? payload.turnId : `codex-app-${Date.now()}`;
+    const turnId = typeof payload.turnId === 'string' ? payload.turnId : `${lastInitConfig?.cliId ?? 'app'}-${Date.now()}`;
     send({
       type: 'final_output',
       content: payload.content,
@@ -2167,7 +2168,7 @@ function handleCodexAppMarker(body: string): void {
 }
 
 function splitCodexAppControl(data: string): string {
-  if (lastInitConfig?.cliId !== 'codex-app' && codexAppOscPending.length === 0) return data;
+  if (!APP_RUNNER_OSC_CLI_IDS.has(lastInitConfig?.cliId ?? '') && codexAppOscPending.length === 0) return data;
   const input = codexAppOscPending + data;
   codexAppOscPending = '';
 

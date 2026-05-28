@@ -62,7 +62,7 @@ Compared to OpenClaw-style approaches built on Agent SDKs:
 ## Prerequisites
 
 - **Node.js** >= 20
-- **AI coding CLI** installed and authenticated (`claude`, `codex`, `coco`, `cursor-agent`, `gemini`, `opencode`, `mtr`, `hermes`, or `agy` (Antigravity) in PATH)
+- **AI coding CLI / local agent app** installed and authenticated (`claude`, `codex`, `coco`, `cursor-agent`, `gemini`, `opencode`, `hermes`, or `agy` (Antigravity) in PATH)
   - **CoCo requires `0.120.32+`**: type-ahead (sending a new message while a turn is still running, parked in CoCo's own message queue) relies on 0.120.32+ behavior; earlier versions may drop or serialize input while busy — upgrade before use
 - **tmux** >= 3.x (optional — auto-enabled when installed for persistent CLI sessions)
 - **CJK fonts** (only needed for screenshot rendering of Chinese text / emoji):
@@ -447,7 +447,7 @@ When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfi
 | `larkAppId` | Yes | Lark app ID |
 | `larkAppSecret` | Yes | Lark app secret |
 | `name` | No | Process name suffix shown by `botmux status`; e.g. `claude-main` appears as `botmux-claude-main`, defaults to `botmux-<index>` |
-| `cliId` | No | CLI adapter, defaults to `claude-code` (options: `aiden`, `coco`, `codex`, `codex-app`, `cursor`, `gemini`, `opencode`, `antigravity`, `mtr`, `hermes`) |
+| `cliId` | No | CLI adapter, defaults to `claude-code` (options: `aiden`, `coco`, `codex`, `codex-app`, `cursor`, `gemini`, `opencode`, `antigravity`, `hermes`) |
 | `model` | No | Model name used when spawning the CLI. Currently honored by: `claude-code`, `codex`, `coco`, `cursor`, `gemini`, `opencode`; other adapters ignore the field. Leave empty to use the CLI default. `botmux setup` proposes per-CLI candidates plus a free-form Other option. |
 | `cliPathOverride` | No | Absolute path to the CLI entry, for wrappers / routers; typical use: `ccr`, `claude-w`, `aiden-x-claude`, etc. |
 | `backendType` | No | Session backend: `pty` or `tmux` (auto-detected by default) |

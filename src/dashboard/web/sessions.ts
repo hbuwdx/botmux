@@ -15,6 +15,7 @@ const CLI_FILTER_OPTIONS = [
   'opencode',
   'mtr',
   'hermes',
+  'mira',
   'aiden',
   'coco',
   'unknown',
