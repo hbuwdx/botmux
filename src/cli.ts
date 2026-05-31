@@ -3443,13 +3443,19 @@ async function cmdReport(rest: string[]): Promise<void> {
   if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
   if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
 
-  // Resolve the orchestrator coords: its thread from the dispatch registry
+  // Resolve the orchestrator coords: its thread/chat from the dispatch registry
   // (keyed by this sub-bot's thread root), its open_id from this session.
   const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
   let reg: Record<string, any> = {};
   try { if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8')); } catch { /* */ }
   const entry = s.rootMessageId ? reg[s.rootMessageId] : undefined;
-  const orchOpenId = s.quoteTargetSenderOpenId;
+  // The orchestrator's open_id (sub-bot-app-scoped) is `ownerOpenId` — captured
+  // once when `botmux dispatch`'s @ created this session. NOT
+  // quoteTargetSenderOpenId: that tracks the *last* sender who @-ed this sub-bot,
+  // so in a coder+reviewer topic it drifts to the reviewer (the peer who @-ed the
+  // coder last) and the report would @ the wrong bot — observed live: the coder's
+  // report @-ed Codex instead of the orchestrator, so the orchestrator never woke.
+  const orchOpenId = s.ownerOpenId;
   if (!entry || !orchOpenId) {
     console.error(
       '当前会话不是被 botmux dispatch 派活的子项目会话（缺少主编排坐标）。\n' +
