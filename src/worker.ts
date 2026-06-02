@@ -3612,7 +3612,14 @@ window.addEventListener('resize',onViewportResize);
   var proto=location.protocol==='https:'?'wss':'ws';
   var ws=new WebSocket(proto+'://'+location.host+base+'/?token='+t);
   ws_=ws;ws.binaryType='arraybuffer';
-  ws.onopen=function(){el.textContent='connected';el.className='ok';sendResize()};
+  // Force a resize on every (re)connect: clear the dedup memory first. On
+  // reconnect the browser grid is usually unchanged, so without this the
+  // dedup in sendResize() would suppress the resize — but a reconnect often
+  // means the server respawned the CLI PTY at the default 160x50 (daemon
+  // restart). If we never re-send our real grid, the PTY stays 160 while this
+  // xterm renders narrower, and Claude's height-relative redraws drift a row
+  // (status-line update bleeds into the line below). Always re-assert size.
+  ws.onopen=function(){el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize()};
   ws.onmessage=function(e){
     var data=typeof e.data==='string'?e.data:new TextDecoder().decode(e.data);
     // botmux OSC 1989: pin the xterm to the adopted pane's fixed size (the pane
