@@ -4753,6 +4753,13 @@ switch (command) {
     await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));
     break;
   }
+  case 'v3': {
+    // `botmux v3 run <dag.json>` — run a hand-written next-gen (v3) DAG on the
+    // real ephemeral worker pool, daemon-independent (dogfood path).
+    const { cmdV3 } = await import('./workflows/v3/cli-run.js');
+    await cmdV3(process.argv[3] ?? '', process.argv.slice(4));
+    break;
+  }
   case 'send':     await cmdSend(process.argv.slice(3)); break;
   case 'dispatch': await cmdDispatch(process.argv.slice(3)); break;
   case 'report': await cmdReport(process.argv.slice(3)); break;

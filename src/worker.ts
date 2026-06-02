@@ -4078,7 +4078,16 @@ process.on('message', async (raw: unknown) => {
           await new Promise(r => setTimeout(r, 200));
           (backend as any).sendSpecialKeys('Enter');
         } else {
-          backend.write(msg.content + '\r');
+          // PtyBackend has no sendText/sendSpecialKeys, so write the keystrokes
+          // directly — but still beat between the text and the Enter. Writing
+          // `content + '\r'` in one chunk submits before the CLI's slash-command
+          // parser has registered the `/cmd` match, so the command is left
+          // unsent in the input box (observed with `/goal <text>` on a pty
+          // workflow worker: typed but never executed). Mirror the tmux path's
+          // 200ms beat.
+          backend.write(msg.content);
+          await new Promise(r => setTimeout(r, 200));
+          backend.write('\r');
         }
         isPromptReady = false;
         idleDetector?.reset();
