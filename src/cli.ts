@@ -44,6 +44,7 @@ import {
   hasOwnerEntry,
   type BotConfigEditInput,
 } from './setup/bot-config-editor.js';
+import { buildPreset, serializePreset, presetFilename } from './setup/agent-preset.js';
 import type { CliId } from './adapters/cli/types.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { logger } from './utils/logger.js';
@@ -2328,6 +2329,12 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   create-group --bot <name> [--bot ...] [--name "群名"]
                                        用指定 bot 起新群；详见 \`botmux create-group --help\`
 
+预设分享（导出某 bot 的可分享配置给同事，绝不含密钥）:
+  preset export <bot> [--from-chat <chatId>] [--out <file>] [--yes]
+                                       导出 cliId/model/角色/能力标签 + 接入指引；
+                                       默认 team 级角色，--from-chat 取某群角色内容；
+                                       缺省写 ./<name或appid>.botmux-preset.json，--out - 走 stdout
+
 配置目录: ~/.botmux/
 文档: https://github.com/deepcoldy/botmux
 `);
@@ -2403,6 +2410,23 @@ function argValue(args: string[], ...flags: string[]): string | undefined {
 
 function argFlag(args: string[], flag: string): boolean {
   return args.includes(flag);
+}
+
+/**
+ * True when `flag` is present but lacks a usable value — i.e. it's the last
+ * token, is followed by another flag, or was given as `--flag=` (empty). Lets
+ * callers surface a friendly error instead of silently falling back to a
+ * default (e.g. treating a value-less `--from-chat` as "no chat"). `allowDash`
+ * permits a bare `-` value (used by `--out -` to mean stdout).
+ */
+function flagPresentButValueMissing(args: string[], flag: string, allowDash = false): boolean {
+  const i = args.findIndex(a => a === flag || a.startsWith(flag + '='));
+  if (i < 0) return false; // absent entirely — not "missing a value"
+  if (args[i].startsWith(flag + '=')) return args[i].slice(flag.length + 1) === '';
+  const next = args[i + 1];
+  if (next === undefined) return true;
+  if (next.startsWith('-')) return !(allowDash && next === '-');
+  return false;
 }
 
 /** Extract positional args, skipping --flag and the value that follows it
@@ -4349,6 +4373,179 @@ function cmdLang(args: string[]): void {
   console.log(`Run \`botmux restart\` for changes to take effect.`);
 }
 
+// ─── botmux preset ────────────────────────────────────────────────────────────
+
+/**
+ * `botmux preset <sub>` dispatcher. Currently only `export`.
+ */
+async function cmdPreset(sub: string, rest: string[]): Promise<void> {
+  switch (sub) {
+    case 'export':
+      await cmdPresetExport(rest);
+      break;
+    default:
+      console.error('用法: botmux preset export <bot> [--from-chat <chatId>] [--out <file>] [--yes]');
+      process.exit(1);
+  }
+}
+
+/**
+ * `botmux preset export <bot> [--from-chat <chatId>] [--out <file>] [--yes]`
+ *
+ * Export a bot's **shareable, secret-free** preset (cliId / model / team role /
+ * capability + an embedded guide) so a teammate's agent can self-configure a
+ * matching bot. Never emits credentials or deployment fields — see
+ * agent-preset.ts:buildPreset for the allow-list guarantee.
+ *
+ * Role source: team-level by default; `--from-chat <chatId>` exports that
+ * group's role content instead (the chatId itself is dropped). Both role and
+ * capability resolve under the effective data dir: this fn sets
+ * `SESSION_DATA_DIR ??= resolveDataDir()` (SESSION_DATA_DIR → ~/.botmux
+ * breadcrumb → default), and reads it via config.session.dataDir's lazy getter —
+ * correct in agent sessions and bare-shell runs alike.
+ */
+async function cmdPresetExport(rest: string[]): Promise<void> {
+  process.env.SESSION_DATA_DIR ??= resolveDataDir();
+
+  const USAGE = '用法: botmux preset export <bot> [--from-chat <chatId>] [--out <file>] [--yes]';
+  const selection = firstPositional(rest, ['--from-chat', '--out']);
+  if (!selection) {
+    console.error(USAGE);
+    console.error('  <bot>  进程名 (botmux-xxx) 或 larkAppId');
+    process.exit(1);
+    return;
+  }
+
+  const bots = loadBotsJson();
+  if (bots.length === 0) {
+    console.error('❌ 没有可用的 bot：未找到 bots.json 或其中为空。先跑 `botmux setup`。');
+    process.exit(1);
+    return;
+  }
+
+  const idx = parseBotSelection(selection, bots);
+  if (idx === undefined) {
+    console.error(`❌ 找不到 bot "${selection}"。可选：`);
+    bots.forEach((b: any, i: number) => {
+      const appId = typeof b.larkAppId === 'string' ? b.larkAppId : '(无 larkAppId)';
+      console.error(`   - ${botProcessName(b, i)}  (${appId})`);
+    });
+    process.exit(1);
+    return;
+  }
+
+  const bot: any = bots[idx];
+  const appId: string = typeof bot.larkAppId === 'string' ? bot.larkAppId : '';
+  if (!appId) {
+    console.error(`❌ bot "${selection}" 缺少 larkAppId，无法解析角色/能力。`);
+    process.exit(1);
+    return;
+  }
+  if (!bot.cliId || typeof bot.cliId !== 'string') {
+    console.error(`❌ bot "${selection}" 缺少 cliId，无法导出预设。`);
+    process.exit(1);
+    return;
+  }
+
+  // Fail loudly when a flag was given without a value, instead of silently
+  // exporting as if it weren't passed (e.g. a value-less `--from-chat` would
+  // otherwise quietly fall back to the team role).
+  if (flagPresentButValueMissing(rest, '--from-chat')) {
+    console.error('❌ --from-chat 需要一个 chatId（如 oc_xxx）。');
+    console.error(USAGE);
+    process.exit(1);
+    return;
+  }
+  if (flagPresentButValueMissing(rest, '--out', true)) {
+    console.error('❌ --out 需要一个文件路径，或用 `--out -` 输出到 stdout。');
+    console.error(USAGE);
+    process.exit(1);
+    return;
+  }
+
+  const fromChat = argValue(rest, '--from-chat');
+  const out = argValue(rest, '--out');
+  const skipConfirm = argFlag(rest, '--yes') || argFlag(rest, '-y');
+
+  // capability + role read the SAME data dir. config.session.dataDir is a lazy
+  // getter, so the SESSION_DATA_DIR set at the top of this fn (= resolveDataDir())
+  // is honored — correct for both agent sessions AND bare-shell runs (no longer
+  // the frozen packaged default).
+  const dataDir = config.session.dataDir;
+  const { resolveTeamRoleFile, resolveRoleFile } = await import('./core/role-resolver.js');
+  const { getBotCapability } = await import('./services/bot-profile-store.js');
+
+  let teamRole: string | null;
+  if (fromChat) {
+    teamRole = resolveRoleFile(appId, fromChat);
+    if (teamRole === null) {
+      console.error(`⚠️  群 ${fromChat} 下没有为该 bot 配置角色；导出将不含 teamRole（仍含 cliId/model/capability）。`);
+    }
+  } else {
+    teamRole = resolveTeamRoleFile(appId);
+    if (teamRole === null) {
+      console.error('⚠️  该 bot 没有 team 级角色；导出将不含 teamRole。可加 `--from-chat <chatId>` 导出某群的角色内容。');
+    }
+  }
+
+  const capability = getBotCapability(dataDir, appId);
+  const sourceName = typeof bot.name === 'string' && bot.name.trim() ? bot.name.trim() : undefined;
+
+  const preset = buildPreset({
+    cliId: bot.cliId,
+    model: typeof bot.model === 'string' ? bot.model : undefined,
+    teamRole,
+    capability,
+    sourceName,
+  });
+  const json = serializePreset(preset);
+
+  // Confirm before writing — the role may carry internal info. --yes skips.
+  if (!skipConfirm) {
+    if (!process.stdin.isTTY) {
+      console.error('❌ 角色内容可能含内部信息，导出前需确认；非交互环境（如 agent 调用）请加 `--yes` 跳过确认。');
+      process.exit(1);
+      return;
+    }
+    if (teamRole || capability) {
+      console.error('\n即将导出以下内容，请确认不含敏感/内部信息：');
+      console.error('────────────────────────────────────────');
+      if (teamRole) console.error(`[角色 teamRole]\n${teamRole}`);
+      if (capability) console.error(`[能力标签 capability] ${capability}`);
+      console.error('────────────────────────────────────────');
+    } else {
+      console.error('\n（无角色 / 能力标签内容，仅导出 cliId/model）');
+    }
+    // Prompt on stderr so a piped stdout (--out -) stays clean.
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    const answer = (await ask(rl, '确认导出？输入 y 继续，其它取消: ')).trim().toLowerCase();
+    rl.close();
+    if (answer !== 'y' && answer !== 'yes') {
+      console.error('已取消，未写入任何文件。');
+      process.exit(1);
+      return;
+    }
+  }
+
+  // stdout mode: the JSON must own stdout; all chatter goes to stderr.
+  if (out === '-') {
+    process.stdout.write(json);
+    console.error('✅ 已输出到 stdout。本文件不含任何密钥（larkAppId/secret/allowedUsers 等均未包含）。');
+    return;
+  }
+
+  const outPath = out ?? `./${presetFilename(sourceName, appId)}`;
+  try {
+    writeFileSync(outPath, json, 'utf-8');
+  } catch (err: any) {
+    console.error(`❌ 写入 ${outPath} 失败: ${err?.message ?? String(err)}`);
+    process.exit(1);
+    return;
+  }
+  console.error(`✅ 已导出预设到 ${outPath}`);
+  console.error('   本文件不含任何密钥（larkAppId/secret/allowedUsers/workingDir 等均未包含），可安全分享。');
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 function getVersion(): string {
@@ -4532,6 +4729,7 @@ switch (command) {
   case 'report': await cmdReport(process.argv.slice(3)); break;
   case 'create-group': await cmdCreateGroup(process.argv.slice(3)); break;
   case 'bots':     await cmdBots(process.argv[3] ?? 'list', process.argv.slice(4)); break;
+  case 'preset':   await cmdPreset(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'history':  await cmdHistory(process.argv.slice(3)); break;
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
   case 'lang':     cmdLang(process.argv.slice(3)); break;
