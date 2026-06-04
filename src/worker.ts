@@ -69,6 +69,7 @@ import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText } from './utils/transient-snapshot.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
+import { parseWorkerRequestUrl } from './utils/worker-http.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
 import { redactChildEnv } from './utils/child-env.js';
@@ -3402,7 +3403,13 @@ function killCli(): void {
 function startWebServer(host: string, preferredPort?: number): Promise<number> {
   return new Promise((resolve, reject) => {
     httpServer = createHttpServer((req, res) => {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const url = parseWorkerRequestUrl(req);
+      if (!url) {
+        log(`Bad worker HTTP URL rejected: ${JSON.stringify(req.url ?? '')}`);
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Request');
+        return;
+      }
       const hasWrite = url.searchParams.get('token') === writeToken;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(getTerminalHtml(hasWrite));
@@ -3414,7 +3421,13 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
       wsClients.add(ws);
 
       // Check token from query string for write access
-      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const url = parseWorkerRequestUrl(req);
+      if (!url) {
+        log(`Bad worker WS URL rejected: ${JSON.stringify(req.url ?? '')}`);
+        wsClients.delete(ws);
+        ws.close(1008, 'Bad Request');
+        return;
+      }
       const hasWrite = url.searchParams.get('token') === writeToken;
       if (hasWrite) authedClients.add(ws);
       log(`WS client connected (total: ${wsClients.size}, write: ${hasWrite})`);
@@ -3932,7 +3945,7 @@ process.on('message', async (raw: unknown) => {
       try {
         let port = 0;
         if (!isWorkflowWorker()) {
-          port = await startWebServer('0.0.0.0', msg.webPort);
+          port = await startWebServer(config.web.workerHost, msg.webPort);
           startScreenUpdates();
           startScreenAnalyzer();
         } else {
@@ -3940,7 +3953,7 @@ process.on('message', async (raw: unknown) => {
           // workflow dashboard can observe in-flight subagents.  Keep the
           // chat-side features disabled: no screen cards, no analyzer, no
           // sessionStore writes.
-          port = await startWebServer('0.0.0.0', msg.webPort);
+          port = await startWebServer(config.web.workerHost, msg.webPort);
           log('Workflow worker mode: web terminal enabled; skipping screen updates and screen analyzer');
         }
         spawnCli(msg);

@@ -1,6 +1,7 @@
 import { networkInterfaces } from 'node:os';
 import type { BackendType } from './adapters/backend/types.js';
 import { probeTmuxFunctional } from './setup/ensure-tmux.js';
+import { resolveWorkerHttpHost } from './utils/worker-http.js';
 
 /** Get the first non-loopback IPv4 address, fallback to localhost. */
 function getLocalIp(): string {
@@ -80,6 +81,7 @@ export const config = {
   },
   web: {
     host: process.env.WEB_HOST ?? '0.0.0.0',
+    workerHost: resolveWorkerHttpHost(),
     get externalHost() { return getWebExternalHost(); },
     // Single reverse-proxy port per daemon that fronts every session's web
     // terminal under `/s/{sessionId}`. Lets dev-machine users forward one port
