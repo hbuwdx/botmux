@@ -72,16 +72,7 @@ function normalizeLifecycleExtractors(v: unknown): ConnectorDefinition['lifecycl
   if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
   const r = v as Record<string, unknown>;
   if (typeof r.dedupKey !== 'string' || !r.dedupKey.trim()) return null;
-  if (typeof r.status !== 'string' || !r.status.trim()) return null;
-  const rawMap = record(r.statusMap);
-  const statusMap = Object.fromEntries(
-    Object.entries(rawMap).filter((e): e is [string, string] => typeof e[1] === 'string'),
-  );
-  return {
-    dedupKey: r.dedupKey.trim(),
-    status: r.status.trim(),
-    ...(Object.keys(statusMap).length > 0 ? { statusMap } : {}),
-  };
+  return { dedupKey: r.dedupKey.trim() };
 }
 
 function normalizeConnectorInput(
@@ -114,12 +105,10 @@ function normalizeConnectorInput(
   if (targetMode === 'fixed' && !chatId) return { ok: false, error: 'fixed_chat_required' };
   const workflowId = typeof target.workflowId === 'string' && target.workflowId.trim() ? target.workflowId.trim() : prior?.target.workflowId;
   if (targetKind === 'workflow' && !workflowId) return { ok: false, error: 'workflow_id_required' };
+  // Dedup is now OPTIONAL for new-group (null = a fresh group per event).
   const lifecycleExtractors = c.lifecycleExtractors === undefined
     ? (prior?.lifecycleExtractors ?? null)
     : normalizeLifecycleExtractors(c.lifecycleExtractors);
-  if (targetMode === 'new-group' && !lifecycleExtractors) {
-    return { ok: false, error: 'lifecycle_extractors_required' };
-  }
 
   const secretRef =
     opts.secretRef ||

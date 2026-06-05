@@ -14,7 +14,6 @@ let prevDataDir: string | undefined;
 
 async function startWebhookServer(opts: {
   createLifecycleGroup?: any;
-  closeLifecycleGroup?: any;
   proxyToDaemon?: any;
 } = {}): Promise<void> {
   vi.resetModules();
@@ -28,7 +27,6 @@ async function startWebhookServer(opts: {
     if (await handleWebhookRoute(req, res, url, {
       proxyToDaemon,
       createLifecycleGroup: opts.createLifecycleGroup,
-      closeLifecycleGroup: opts.closeLifecycleGroup,
     })) return;
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'not_found' }));
@@ -78,9 +76,27 @@ async function seedNewGroupConnector(): Promise<ConnectorDefinition> {
     target: { mode: 'new-group', kind: 'turn', botId: 'app1', botIds: ['app1', 'app2'] },
     promptEnvelope: { sourceName: 'alerts', headerAllowlist: [], includeRawText: false, maxBodyBytes: 1024 },
     loggingPolicy: { storePayload: false, storeHeaders: false, retentionDays: 14 },
-    lifecycleExtractors: { dedupKey: '$.alert.id', status: '$.alert.status', statusMap: { recovered: 'resolved' } },
+    lifecycleExtractors: { dedupKey: '$.alert.id' },
     createdAt: '2026-05-24T00:00:00.000Z',
     updatedAt: '2026-05-24T00:00:00.000Z',
+  });
+}
+
+async function seedNoDedupConnector(): Promise<ConnectorDefinition> {
+  const { createWebhookSecret } = await import('../src/services/webhook-key.js');
+  const { upsertConnector } = await import('../src/services/connector-store.js');
+  const secret = createWebhookSecret('tok_plain_value');
+  return upsertConnector({
+    id: 'conn_nodedup',
+    name: 'Per-event rooms',
+    enabled: true,
+    verify: { type: 'token', secretRef: secret.ref, signatureHeader: 'x-botmux-signature', timestampHeader: 'x-botmux-timestamp', nonceHeader: 'x-botmux-nonce', toleranceSeconds: 300 },
+    target: { mode: 'new-group', kind: 'turn', botId: 'app1' },
+    promptEnvelope: { sourceName: 'events', headerAllowlist: [], includeRawText: false, maxBodyBytes: 1024 },
+    loggingPolicy: { storePayload: false, storeHeaders: false, retentionDays: 14 },
+    lifecycleExtractors: null,
+    createdAt: '2026-06-06T00:00:00.000Z',
+    updatedAt: '2026-06-06T00:00:00.000Z',
   });
 }
 
@@ -253,21 +269,32 @@ describe('webhook new-group lifecycle', () => {
     expect(proxyToDaemon).toHaveBeenCalledTimes(2);
   });
 
-  it('closes the lifecycle group on resolved events without triggering a model turn', async () => {
+  it('rejects an event whose configured dedup key is absent from the payload', async () => {
     const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_new', creatorLarkAppId: 'app1' }));
-    const closeLifecycleGroup = vi.fn(async () => ({ ok: true }));
+    await startWebhookServer({ createLifecycleGroup });
+    await seedNewGroupConnector();
+    const res = await postWebhook('conn_new_group', 'nonce_x', { other: 'shape' });
+    expect(res.status).toBe(400);
+    expect(res.body.errorCode).toBe('lifecycle_extract_failed');
+    expect(createLifecycleGroup).not.toHaveBeenCalled();
+  });
+
+  it('creates a fresh group for every event when dedup is not configured', async () => {
+    const createLifecycleGroup = vi.fn(async () => ({ chatId: 'oc_fresh', creatorLarkAppId: 'app1' }));
     const proxyToDaemon = vi.fn(async () => ({
       status: 200,
-      text: async () => JSON.stringify({ ok: true, action: 'delivered' }),
+      text: async () => JSON.stringify({ ok: true, action: 'delivered', target: { kind: 'turn', chatId: 'oc_fresh' } }),
     })) as any;
-    await startWebhookServer({ createLifecycleGroup, closeLifecycleGroup, proxyToDaemon });
-    await seedNewGroupConnector();
+    await startWebhookServer({ createLifecycleGroup, proxyToDaemon });
+    await seedNoDedupConnector();
 
-    await postWebhook('conn_new_group', 'nonce_3', { alert: { id: 'disk-full', status: 'firing' } });
-    const resolved = await postWebhook('conn_new_group', 'nonce_4', { alert: { id: 'disk-full', status: 'recovered' } });
-    expect(resolved.status).toBe(200);
-    expect(resolved.body.lifecycle).toMatchObject({ dedupKey: 'disk-full', status: 'resolved', action: 'close', chatId: 'oc_new' });
-    expect(closeLifecycleGroup).toHaveBeenCalledTimes(1);
-    expect(proxyToDaemon).toHaveBeenCalledTimes(1);
+    const a = await fetch(`${baseUrl}/webhook/conn_nodedup/tok_plain_value`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"x":1}' });
+    const b = await fetch(`${baseUrl}/webhook/conn_nodedup/tok_plain_value`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"x":2}' });
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    // Two events → two group creations (no reuse), each dispatched.
+    expect(createLifecycleGroup).toHaveBeenCalledTimes(2);
+    expect(proxyToDaemon).toHaveBeenCalledTimes(2);
+    expect((await a.json()).lifecycle).toMatchObject({ action: 'create', chatId: 'oc_fresh' });
   });
 });

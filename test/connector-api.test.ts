@@ -152,29 +152,30 @@ describe('connector-api write routes', () => {
     expect(JSON.stringify(await json(await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(id)}`)))).not.toContain(rotated.secret);
   });
 
-  it('requires lifecycle extractors for new-group connectors and preserves botIds', async () => {
-    const bad = await fetch(`${baseUrl}/api/connectors`, {
+  it('allows a new-group connector with NO dedup (every event → fresh group) and preserves botIds', async () => {
+    const created = await json(await fetch(`${baseUrl}/api/connectors`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        name: 'Auto war-room',
+        name: 'Per-event rooms',
         target: { mode: 'new-group', kind: 'turn', botId: 'app1', botIds: ['app2'] },
       }),
-    });
-    expect(bad.status).toBe(400);
-    expect((await json(bad)).error).toBe('lifecycle_extractors_required');
+    }));
+    expect(created.connector.target.botIds).toEqual(['app1', 'app2']);
+    expect(created.connector.lifecycleExtractors).toBeNull();
+  });
 
+  it('stores a dedup-only lifecycleExtractors (status dropped) for new-group', async () => {
     const created = await json(await fetch(`${baseUrl}/api/connectors`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         name: 'Auto war-room',
-        target: { mode: 'new-group', kind: 'turn', botId: 'app1', botIds: ['app2'] },
+        target: { mode: 'new-group', kind: 'turn', botId: 'app1' },
         lifecycleExtractors: { dedupKey: '$.alert.id', status: '$.alert.state' },
       }),
     }));
-    expect(created.connector.target.botIds).toEqual(['app1', 'app2']);
-    expect(created.connector.lifecycleExtractors).toEqual({ dedupKey: '$.alert.id', status: '$.alert.state' });
+    expect(created.connector.lifecycleExtractors).toEqual({ dedupKey: '$.alert.id' });
   });
 
   it('manages standalone webhook secrets as metadata-only reads', async () => {

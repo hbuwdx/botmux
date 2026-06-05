@@ -4,13 +4,11 @@ import { getConnector, type ConnectorDefinition } from '../services/connector-st
 import { getWebhookSecret } from '../services/webhook-key.js';
 import type { TriggerRequest, TriggerResponse } from '../services/trigger-types.js';
 import { appendTriggerLog } from '../services/trigger-log-store.js';
-import { extractWebhookLifecycle } from '../services/webhook-lifecycle-extractors.js';
+import { extractDedupKey } from '../services/webhook-lifecycle-extractors.js';
 import {
   activateWebhookLifecycleGroup,
   beginWebhookLifecycleFiring,
   failWebhookLifecycleGroup,
-  resolveWebhookLifecycleGroup,
-  type WebhookLifecycleRecord,
 } from '../services/webhook-lifecycle-store.js';
 import { jsonRes } from './workflow-api.js';
 import { dispatchTriggerRequest, newTriggerId, type TriggerApiDeps } from './trigger-api.js';
@@ -23,10 +21,6 @@ export type WebhookRouteDeps = TriggerApiDeps & {
     connector: ConnectorDefinition,
     args: { dedupKey: string },
   ) => Promise<{ chatId: string; creatorLarkAppId?: string }>;
-  closeLifecycleGroup?: (
-    connector: ConnectorDefinition,
-    record: WebhookLifecycleRecord,
-  ) => Promise<{ ok: boolean; error?: string }>;
 };
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
@@ -266,77 +260,73 @@ export async function handleWebhookRoute(
 
   const parsed = parsePayload(rawBody);
   if (connector.target.mode === 'new-group') {
-    const extracted = extractWebhookLifecycle(parsed.payload, connector.lifecycleExtractors);
-    if (!extracted.ok) {
-      webhookError(res, 400, connectorId, 'lifecycle_extract_failed', extracted.error);
-      return true;
-    }
-    const { dedupKey, status } = extracted.lifecycle;
+    // Dedup is optional. Configured → events with the same extracted value share
+    // one group (create once, reuse after). Not configured → every event spins
+    // up a fresh group. (No firing/resolved status; groups are never auto-closed.)
+    const dedupPath = connector.lifecycleExtractors?.dedupKey;
+    let chatId: string | undefined;
+    let dedupKey: string | undefined;
+    let action: 'create' | 'reuse' = 'create';
 
-    if (status === 'resolved') {
-      const resolved = await resolveWebhookLifecycleGroup(connector.id, dedupKey);
-      let closeResult: { ok: boolean; error?: string } | undefined;
-      if (resolved.action === 'close' && resolved.record?.chatId) {
-        closeResult = deps.closeLifecycleGroup
-          ? await deps.closeLifecycleGroup(connector, resolved.record)
-          : { ok: false, error: 'closeLifecycleGroup hook not configured' };
-      }
-      const body = webhookOkLog(connector.id, 'ignored', `lifecycle ${resolved.action}`);
-      jsonRes(res, closeResult?.ok === false ? 502 : 200, {
-        ...body,
-        lifecycle: { dedupKey, status, action: resolved.action, chatId: resolved.record?.chatId },
-        ...(closeResult?.ok === false ? { ok: false, errorCode: 'trigger_failed', error: closeResult.error } : {}),
-      });
-      return true;
-    }
-
-    const begun = await beginWebhookLifecycleFiring(connector.id, dedupKey);
-    if (begun.action === 'creating') {
-      jsonRes(res, 202, {
-        ...webhookOkLog(connector.id, 'ignored', 'lifecycle group creation already in progress'),
-        lifecycle: { dedupKey, status, action: 'creating' },
-      });
-      return true;
-    }
-
-    let chatId = begun.action === 'reuse' ? begun.record.chatId : undefined;
-    if (begun.action === 'create') {
-      if (!deps.createLifecycleGroup) {
-        await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
-        webhookError(res, 501, connector.id, 'group_create_failed', 'createLifecycleGroup hook not configured');
+    if (dedupPath) {
+      const value = extractDedupKey(parsed.payload, dedupPath);
+      if (!value) {
+        webhookError(res, 400, connectorId, 'lifecycle_extract_failed', 'dedup_key_not_found');
         return true;
       }
-      let created: { chatId: string; creatorLarkAppId?: string };
-      try {
-        created = await deps.createLifecycleGroup(connector, { dedupKey });
-      } catch (e: any) {
-        await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
-        webhookError(res, 502, connector.id, 'group_create_failed', e?.message ?? String(e));
-        return true;
-      }
-      const activated = await activateWebhookLifecycleGroup(
-        connector.id,
-        dedupKey,
-        begun.record.lifecycleId,
-        created.chatId,
-        { creatorLarkAppId: created.creatorLarkAppId },
-      );
-      if (activated.status === 'pending_resolved') {
-        const closeResult = deps.closeLifecycleGroup && activated.record
-          ? await deps.closeLifecycleGroup(connector, activated.record)
-          : { ok: true };
-        jsonRes(res, closeResult.ok ? 200 : 502, {
-          ...webhookOkLog(connector.id, 'ignored', 'lifecycle resolved before group activation'),
-          lifecycle: { dedupKey, status: 'resolved', action: 'closed', chatId: created.chatId },
-          ...(closeResult.ok ? {} : { ok: false, errorCode: 'trigger_failed', error: closeResult.error }),
+      dedupKey = value;
+      const begun = await beginWebhookLifecycleFiring(connector.id, dedupKey);
+      if (begun.action === 'creating') {
+        jsonRes(res, 202, {
+          ...webhookOkLog(connector.id, 'ignored', 'lifecycle group creation already in progress'),
+          lifecycle: { dedupKey, action: 'creating' },
         });
         return true;
       }
-      if (activated.status !== 'active' || !activated.record?.chatId) {
-        webhookError(res, 409, connector.id, 'replay', 'lifecycle record was replaced before activation');
+      if (begun.action === 'reuse') {
+        action = 'reuse';
+        chatId = begun.record.chatId;
+      } else {
+        if (!deps.createLifecycleGroup) {
+          await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
+          webhookError(res, 501, connector.id, 'group_create_failed', 'createLifecycleGroup hook not configured');
+          return true;
+        }
+        let created: { chatId: string; creatorLarkAppId?: string };
+        try {
+          created = await deps.createLifecycleGroup(connector, { dedupKey });
+        } catch (e: any) {
+          await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
+          webhookError(res, 502, connector.id, 'group_create_failed', e?.message ?? String(e));
+          return true;
+        }
+        const activated = await activateWebhookLifecycleGroup(
+          connector.id,
+          dedupKey,
+          begun.record.lifecycleId,
+          created.chatId,
+          { creatorLarkAppId: created.creatorLarkAppId },
+        );
+        if (activated.status !== 'active' || !activated.record?.chatId) {
+          webhookError(res, 409, connector.id, 'replay', 'lifecycle record was replaced before activation');
+          return true;
+        }
+        chatId = activated.record.chatId;
+      }
+    } else {
+      // No dedup: a brand-new group per event (the group name uses the requestId
+      // for uniqueness). No lifecycle store record is kept — nothing to reuse.
+      if (!deps.createLifecycleGroup) {
+        webhookError(res, 501, connector.id, 'group_create_failed', 'createLifecycleGroup hook not configured');
         return true;
       }
-      chatId = activated.record.chatId;
+      try {
+        const created = await deps.createLifecycleGroup(connector, { dedupKey: requestId.slice(0, 16) });
+        chatId = created.chatId;
+      } catch (e: any) {
+        webhookError(res, 502, connector.id, 'group_create_failed', e?.message ?? String(e));
+        return true;
+      }
     }
 
     if (!chatId) {
@@ -366,11 +356,11 @@ export async function handleWebhookRoute(
         ...(connector.promptEnvelope.includeRawText ? { rawText: parsed.rawText } : {}),
       },
       ...(connector.promptEnvelope.instruction ? { instruction: connector.promptEnvelope.instruction } : {}),
-      options: { dedupKey, status },
+      options: dedupKey ? { dedupKey } : {},
     };
 
     const result = await dispatchTriggerRequest(trigger, deps);
-    jsonRes(res, result.status, { ...result.body, lifecycle: { dedupKey, action: begun.action, chatId } });
+    jsonRes(res, result.status, { ...result.body, lifecycle: { ...(dedupKey ? { dedupKey } : {}), action, chatId } });
     return true;
   }
 

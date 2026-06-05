@@ -64,8 +64,11 @@ function pageHtml(): string {
         <b>动态模式</b>：群 ID 随每次请求传入，三选一 —— 查询参数 <code>?chatId=&lt;群ID&gt;</code> · 请求头 <code>x-botmux-chat-id: &lt;群ID&gt;</code> · 请求体 <code>{"chatId":"&lt;群ID&gt;"}</code>。<br>想"一个 URL 直接触发、不带参数"，请改选「固定群」。
       </div>
     </div>
-    <label class="cn-life" style="display:none">去重字段</label><input class="cn-life" id="cn-dedup" style="display:none" placeholder="如 payload.alert.id">
-    <label class="cn-life" style="display:none">状态字段</label><input class="cn-life" id="cn-status" style="display:none" placeholder="如 payload.status">
+    <label class="cn-life" style="display:none">去重字段<span class="muted" style="font-weight:400">（可选）</span></label>
+    <div class="cn-life" style="display:none">
+      <input id="cn-dedup" placeholder="如 alert.id（从事件 body 取值）" style="width:100%;box-sizing:border-box">
+      <div class="muted" style="font-size:12px;margin-top:4px">填了：命中相同值的事件都投到<b>同一个群</b>。留空：每个事件<b>新建一个群</b>。</div>
+    </div>
     <label style="align-self:start">处理指令<span class="muted" style="font-weight:400">（可选）</span></label>
     <textarea id="cn-instruction" rows="3" placeholder="事件触发时让机器人做什么。如：总结这条告警的严重程度，@相关 oncall，给出排查建议。留空 = 只把事件原样交给模型自由发挥。" style="width:100%;box-sizing:border-box;font-family:inherit;font-size:13px"></textarea>
     <label>校验方式</label>
@@ -221,8 +224,8 @@ export function renderConnectorsPage(root: HTMLElement): void {
       if (picked.length) body.target.allowChats = picked;
     }
     if (mode === 'new-group') {
-      if (!val('cn-dedup') || !val('cn-status')) { out.innerHTML = '<span class="err">「每次新建群」需要填去重字段和状态字段</span>'; return; }
-      body.lifecycleExtractors = { dedupKey: val('cn-dedup'), status: val('cn-status') };
+      const dedup = val('cn-dedup');
+      body.lifecycleExtractors = dedup ? { dedupKey: dedup } : null;
     }
     body.verify = { type: ($('cn-verify') as HTMLSelectElement).value };
     const secret = val('cn-secret'); if (secret) body.secret = secret;
@@ -257,7 +260,7 @@ export function renderConnectorsPage(root: HTMLElement): void {
         <p style="margin:4px 0;font-size:13px"><span class="muted">Webhook URL：</span><code style="word-break:break-all">${escapeHtml(url)}</code></p>
         ${sec ? `<p style="margin:4px 0;font-size:13px"><span class="muted">${isToken ? '访问令牌' : '签名密钥'}（只显示这一次，请保存）：</span><code>${escapeHtml(sec)}</code></p>` : ''}
         ${usage}</div>`;
-      (['cn-name', 'cn-wf', 'cn-chat', 'cn-dedup', 'cn-status', 'cn-secret', 'cn-instruction'] as const).forEach(id => { ($(id) as HTMLInputElement).value = ''; });
+      (['cn-name', 'cn-wf', 'cn-chat', 'cn-dedup', 'cn-secret', 'cn-instruction'] as const).forEach(id => { ($(id) as HTMLInputElement).value = ''; });
       ($('cn-allow-sel') as HTMLSelectElement).selectedIndex = -1;
       load();
     } else {

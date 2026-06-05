@@ -44,10 +44,10 @@ export interface ConnectorDefinition {
     storeHeaders: boolean;
     retentionDays: number;
   };
+  // new-group dedup: null = no dedup (every event → a fresh group); { dedupKey }
+  // = events whose payload yields the same value at `dedupKey` share one group.
   lifecycleExtractors: null | {
     dedupKey: string;
-    status: string;
-    statusMap?: Record<string, string>;
   };
   rateLimit?: {
     windowSeconds: number;

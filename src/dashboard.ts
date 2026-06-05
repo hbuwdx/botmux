@@ -30,7 +30,6 @@ import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, readGlobalConfig, type DashboardGlobalConfig } from './global-config.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
-import type { WebhookLifecycleRecord } from './services/webhook-lifecycle-store.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
@@ -269,12 +268,22 @@ async function createLifecycleGroupForWebhook(
   if (!pick) throw new Error('no_online_daemon');
   const creator = registry.getByAppId(pick.creatorLarkAppId);
   if (!creator) throw new Error('creator_daemon_offline');
+  // Pull the creator bot's authorized humans (allowedUsers) into the auto-created
+  // group so a person — not just bots — is in the room. allowedUsers stores both
+  // union_ids (on_, tenant-stable) and legacy open_ids (ou_, creator-app-scoped);
+  // route each to the matching invite channel. @-notify the first open_id if any.
+  const allowed = creator.resolvedAllowedUsers ?? [];
+  const ownerUnionIds = allowed.filter(u => u.startsWith('on_'));
+  const userOpenIds = allowed.filter(u => u.startsWith('ou_'));
   const upstream = await fetch(`http://127.0.0.1:${creator.ipcPort}/api/groups/create`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       name: lifecycleGroupName(connector, args.dedupKey),
       larkAppIds: selectedIds,
+      ...(ownerUnionIds.length > 0 ? { ownerUnionIds } : {}),
+      ...(userOpenIds.length > 0 ? { userOpenIds } : {}),
+      ...(userOpenIds[0] ? { notifyOwnerOpenId: userOpenIds[0] } : {}),
     }),
   });
   const text = await upstream.text();
@@ -284,31 +293,6 @@ async function createLifecycleGroupForWebhook(
     throw new Error(parsed?.error ?? `group_create_http_${upstream.status}`);
   }
   return { chatId: parsed.chatId, creatorLarkAppId: parsed.creator ?? pick.creatorLarkAppId };
-}
-
-async function closeLifecycleGroupForWebhook(
-  connector: ConnectorDefinition,
-  record: WebhookLifecycleRecord,
-): Promise<{ ok: boolean; error?: string }> {
-  if (!record.chatId) return { ok: true };
-  const candidates = Array.from(new Set([
-    record.creatorLarkAppId,
-    ...lifecycleBotIds(connector),
-  ].filter((x): x is string => typeof x === 'string' && x.length > 0)));
-  let lastError = 'no_candidate_bot';
-  for (const appId of candidates) {
-    try {
-      const upstream = await proxyToDaemon(appId, `/api/groups/${encodeURIComponent(record.chatId)}/disband`, { method: 'POST' });
-      const text = await upstream.text();
-      let parsed: any = null;
-      try { parsed = JSON.parse(text); } catch { /* tolerate */ }
-      if (upstream.ok && parsed?.ok) return { ok: true };
-      lastError = parsed?.error ?? `group_disband_http_${upstream.status}`;
-    } catch (e: any) {
-      lastError = e?.message ?? String(e);
-    }
-  }
-  return { ok: false, error: lastError };
 }
 
 /**
@@ -354,7 +338,6 @@ const server = createServer(async (req, res) => {
     if (await handleWebhookRoute(req, res, url, {
       proxyToDaemon,
       createLifecycleGroup: createLifecycleGroupForWebhook,
-      closeLifecycleGroup: closeLifecycleGroupForWebhook,
     })) {
       return;
     }
