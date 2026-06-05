@@ -50,7 +50,7 @@ function teamByKey(key: string): Team | undefined { return allTeams().find(t => 
 
 function subNav(active: 'home' | 'manage'): string {
   const tab = (href: string, label: string, on: boolean) =>
-    `<a href="${href}" style="padding:6px 14px;border-radius:8px;text-decoration:none;font-size:14px;${on ? 'background:var(--accent,#3370ff);color:#fff' : 'color:var(--text,#1f2329)'}">${label}</a>`;
+    `<a href="${href}" style="padding:6px 14px;border-radius:8px;text-decoration:none;font-size:14px;${on ? 'background:var(--accent);color:var(--on-accent)' : 'color:var(--muted)'}">${label}</a>`;
   return `<div style="display:flex;gap:8px;margin-bottom:14px">${tab('#/team', '我的团队', active === 'home')}${tab('#/team/manage', '团队管理', active === 'manage')}</div>`;
 }
 
@@ -82,7 +82,7 @@ ${subNav('home')}
   <div id="tf-teams">加载中…</div>
 </div>
 <div id="tf-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);align-items:center;justify-content:center;z-index:50">
-  <div style="background:var(--card,#fff);color:var(--text,#1f2329);border-radius:10px;padding:18px 20px;width:min(560px,92vw)">
+  <div style="background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:18px 20px;width:min(560px,92vw)">
     <h2 id="tf-modal-title" style="margin-top:0">默认角色</h2>
     <p class="muted" style="font-size:13px">该机器人的默认人设（跨群生效），此处只读。如需修改，请到「Bot 配置」页。</p>
     <textarea id="tf-modal-text" readonly style="width:100%;min-height:200px;font:13px/1.5 ui-monospace,Menlo,monospace;padding:10px;box-sizing:border-box"></textarea>

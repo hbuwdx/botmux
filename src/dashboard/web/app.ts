@@ -45,14 +45,14 @@ export function showAuthExpiredOverlay(): void {
     'position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;' +
     'align-items:center;justify-content:center;z-index:9999';
   el.innerHTML =
-    '<div style="background:var(--card,#fff);color:var(--text,#1f2329);border-radius:12px;' +
+    '<div style="background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:12px;' +
     'padding:36px 40px;max-width:460px;width:90vw;text-align:center;' +
     'box-shadow:0 12px 40px rgba(0,0,0,.35)">' +
-    '<h2 style="margin:0 0 14px;font-size:19px">访问链接已失效</h2>' +
+    '<h2 style="margin:0 0 14px;font-size:19px;color:var(--fg)">访问链接已失效</h2>' +
     '<p style="margin:0 0 24px;line-height:1.7;color:var(--muted,#8f959e);font-size:14px">' +
     '当前链接/访问已失效，请使用最新授权链接重新进入（运行 botmux dashboard 获取）。</p>' +
     '<button id="auth-expired-dismiss" type="button" ' +
-    'style="padding:8px 22px;background:var(--accent,#3370ff);color:#fff;border:none;' +
+    'style="padding:8px 22px;background:var(--accent);color:var(--on-accent);border:none;' +
     'border-radius:8px;cursor:pointer;font-size:14px">知道了</button>' +
     '</div>';
   document.body.appendChild(el);
@@ -174,13 +174,14 @@ function applyAuthVisibility(): void {
 function renderAuthRequiredPage(host: HTMLElement): void {
   host.innerHTML =
     '<section class="auth-required" style="max-width:520px;margin:64px auto;text-align:center;' +
-    'background:var(--card,#fff);border-radius:14px;padding:40px 36px;box-shadow:0 8px 28px rgba(0,0,0,.12)">' +
-    '<h2 style="margin:0 0 12px;font-size:20px">此页需要授权链接</h2>' +
-    '<p style="margin:0 0 24px;line-height:1.7;color:var(--muted,#8f959e);font-size:14px">' +
+    'background:var(--surface);color:var(--fg);border:1px solid var(--border);border-radius:14px;' +
+    'padding:40px 36px;box-shadow:0 8px 28px rgba(0,0,0,.12)">' +
+    '<h2 style="margin:0 0 12px;font-size:20px;color:var(--fg)">此页需要授权链接</h2>' +
+    '<p style="margin:0 0 24px;line-height:1.7;color:var(--muted);font-size:14px">' +
     '你当前是只读访问，管理页（角色 / Bot 配置 / 团队 / 接入点）需要授权链接。' +
     '运行 <code>botmux dashboard</code> 获取最新链接后即可管理。</p>' +
-    '<a href="#/" style="display:inline-block;padding:8px 22px;background:var(--accent,#3370ff);' +
-    'color:#fff;border-radius:8px;text-decoration:none;font-size:14px">返回总览</a>' +
+    '<a href="#/" style="display:inline-block;padding:8px 22px;background:var(--accent);' +
+    'color:var(--on-accent);border-radius:8px;text-decoration:none;font-size:14px">返回总览</a>' +
     '</section>';
 }
 
