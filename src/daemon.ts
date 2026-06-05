@@ -53,7 +53,7 @@ import {
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
-import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, handleCardCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
+import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, handleCommand, handleCardCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
@@ -95,6 +95,7 @@ import { EventLog as WorkflowEventLog } from './workflows/events/append.js';
 import { replay as replayWorkflow } from './workflows/events/replay.js';
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
+import { normalizeBrand } from './im/lark/lark-hosts.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
 import { markSessionActivity, announcePendingRepoSession } from './core/session-activity.js';
 import { WorkflowEventWatcher, handleWorkflowFanoutEvent } from './workflows/fanout.js';
@@ -1928,7 +1929,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       await handleCardCommand(anchor, larkAppId, chatId, senderOpenId, commandContent, commandDeps);
       return;
     }
-    if (PASSTHROUGH_COMMANDS.has(cmd)) {
+    if (resolvePassthroughCommands(larkAppId).has(cmd)) {
       await sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
       return;
     }
@@ -2487,7 +2488,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       await sessionReply(anchor, restrictedText, 'text', larkAppId);
       return;
     }
-    if (PASSTHROUGH_COMMANDS.has(cmd)) {
+    if (resolvePassthroughCommands(larkAppId).has(cmd)) {
       // 语义边界（刻意保留，非疏漏）：passthrough（/model /clear /compact 等）按
       // “发给 CLI 的对话输入”处理，因此不过下面 DAEMON_COMMANDS 的 oncall
       // canOperate 闸 —— oncall 放行的就是对话输入，canOperate 只管 botmux
@@ -3115,7 +3116,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const evicted = activeSessions.delete(key);
         logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
       },
-    });
+    }, normalizeBrand(cfg.brand));
   }
 
   // Restore active sessions from previous run
