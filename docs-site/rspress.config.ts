@@ -6,10 +6,27 @@ export default defineConfig({
   lang: 'zh',
   title: 'botmux 文档',
   description: '飞书话题群 ↔ AI 编程 CLI 桥接',
+  icon: 'https://magic-builder.tos-cn-beijing.volces.com/uploads/1780767592185_botmux-favicon.svg',
+  logo: 'https://magic-builder.tos-cn-beijing.volces.com/uploads/1780767592185_botmux-favicon.svg',
+  logoText: 'botmux 文档',
+  // og:title / og:description 由 rspress 按页自动生成，这里只补它不处理的
+  head: [
+    ['meta', { property: 'og:type', content: 'website' }],
+    ['meta', { property: 'og:url', content: 'https://bytedance.aiforce.cloud/app/app_4k9smq6rdxher/' }],
+    ['meta', { property: 'og:image', content: 'https://magic-builder.tos-cn-beijing.volces.com/uploads/1780767592455_botmux-logo.svg' }],
+    ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+    ['meta', { name: 'twitter:image', content: 'https://magic-builder.tos-cn-beijing.volces.com/uploads/1780767592455_botmux-logo.svg' }],
+    ['meta', { name: 'theme-color', content: '#06b6d4' }],
+  ],
+  search: { codeBlocks: true },
+  markdown: { link: { checkDeadLinks: true } },
   builderConfig: {
-    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v11/" },
+    output: { assetPrefix: "https://cdn.jsdelivr.net/gh/deepcoldy/botmux@docs-assets-v12/" },
   },
   themeConfig: {
+    editLink: {
+      docRepoBaseUrl: 'https://github.com/deepcoldy/botmux/tree/master/docs-site/docs',
+    },
     socialLinks: [
       { icon: 'github', mode: 'link', content: 'https://github.com/deepcoldy/botmux' },
     ],
@@ -171,6 +188,6 @@ export default defineConfig({
             ]
       }
 ] },
-    lastUpdated: false,
+    lastUpdated: true,
   },
 });
