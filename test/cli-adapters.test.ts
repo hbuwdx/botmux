@@ -10,9 +10,12 @@ import { randomUUID } from 'node:crypto';
 // Mock external dependencies BEFORE importing adapters
 // ---------------------------------------------------------------------------
 
-// Mock child_process.execSync so resolveCommand() returns the command as-is.
+// Mock child_process so resolveCommand()'s shell probe returns nothing (the
+// command falls through to the bare name). resolveCommand short-circuits
+// absolute paths before probing, so absolute pathOverrides never hit this.
 vi.mock('node:child_process', () => ({
   execSync: vi.fn(() => ''),
+  spawnSync: vi.fn(() => ({ stdout: '', status: 0 })),
 }));
 
 import { createCliAdapterSync } from '../src/adapters/cli/registry.js';
@@ -27,13 +30,15 @@ import { createAntigravityAdapter } from '../src/adapters/cli/antigravity.js';
 import { createMtrAdapter, mtrSessionIdForBotmuxSession } from '../src/adapters/cli/mtr.js';
 import { createHermesAdapter } from '../src/adapters/cli/hermes.js';
 import { createMiraAdapter } from '../src/adapters/cli/mira.js';
+import { createCopilotAdapter } from '../src/adapters/cli/copilot.js';
+import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import type { CliAdapter, CliId } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira'];
+const ALL_CLI_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'codex-app', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'mira', 'pi', 'copilot'];
 
 // ---------------------------------------------------------------------------
 // 1. Factory: createCliAdapterSync
@@ -55,6 +60,43 @@ describe('createCliAdapterSync factory', () => {
     if (id === 'codex-app' || id === 'mira') expect(adapter.resolvedBin).toBe(process.execPath);
     else expect(adapter.resolvedBin).toBe(`/opt/${id}`);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Lazy binary resolution — constructing an adapter must NOT shell out.
+// Regression for the setup hang: `botmux setup` builds an adapter just to read
+// `modelChoices`; if resolveCommand ran at construction it could suspend setup
+// via the interactive shell probe. The probe must defer to first resolvedBin read.
+// ---------------------------------------------------------------------------
+
+describe('lazy binary resolution', () => {
+  // Adapters whose resolvedBin is the resolved CLI (codex-app/mira use
+  // process.execPath and never probe, so they're excluded).
+  const PROBING_IDS: CliId[] = ['claude-code', 'seed', 'aiden', 'coco', 'codex', 'cursor', 'gemini', 'opencode', 'antigravity', 'mtr', 'hermes', 'copilot'];
+
+  it.each(PROBING_IDS)('"%s": construction does not probe; first resolvedBin read does', async (id) => {
+    const { spawnSync } = await import('node:child_process');
+    const probe = vi.mocked(spawnSync);
+    probe.mockClear();
+    const adapter = createCliAdapterSync(id); // bare command name → would probe if eager
+    // Seed eagerly resolves its bin to derive its data root; the others must not
+    // touch the shell until resolvedBin is read.
+    if (id !== 'seed') expect(probe).not.toHaveBeenCalled();
+    probe.mockClear();
+    void adapter.resolvedBin;
+    if (id !== 'seed') expect(probe).toHaveBeenCalled();
+  });
+
+  it('memoises: a second resolvedBin read does not probe again', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const probe = vi.mocked(spawnSync);
+    const adapter = createCliAdapterSync('claude-code');
+    void adapter.resolvedBin; // resolve + cache
+    probe.mockClear();
+    void adapter.resolvedBin; // cached → no probe
+    expect(probe).not.toHaveBeenCalled();
+  });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -295,6 +337,53 @@ describe('mira buildArgs', () => {
   });
 });
 
+describe('copilot buildArgs', () => {
+  const adapter = createCopilotAdapter('/usr/bin/copilot');
+
+  it('fresh session passes --allow-all-tools without resume flags', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cp', resume: false });
+    expect(args).toContain('--allow-all-tools');
+    expect(args).not.toContain('--resume');
+    expect(args).not.toContain('--continue');
+    expect(args).not.toContain('sess-cp');
+  });
+
+  it('resume with cliSessionId passes --resume <id>', () => {
+    const args = adapter.buildArgs({
+      sessionId: 'sess-cp',
+      resume: true,
+      resumeSessionId: 'copilot-sess-abc',
+    });
+    expect(args).toContain('--resume');
+    const idx = args.indexOf('--resume');
+    expect(args[idx + 1]).toBe('copilot-sess-abc');
+  });
+
+  it('resume without cliSessionId falls back to --continue', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cp', resume: true });
+    expect(args).toContain('--continue');
+    expect(args).not.toContain('--resume');
+  });
+
+  it('passes configured model with --model', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cp', resume: false, model: 'gpt-5' });
+    const idx = args.indexOf('--model');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(args[idx + 1]).toBe('gpt-5');
+  });
+
+  it('does not bake initialPrompt into args', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-cp', resume: false, initialPrompt: 'hello copilot' });
+    expect(args).not.toContain('hello copilot');
+    expect(adapter.passesInitialPromptViaArgs).toBeFalsy();
+  });
+
+  it('surfaces curated model choices for setup', () => {
+    expect(adapter.modelChoices).toContain('claude-sonnet-4');
+    expect(adapter.modelChoices).toContain('gpt-5');
+  });
+});
+
 describe('gemini buildArgs', () => {
   const adapter = createGeminiAdapter('/usr/bin/gemini');
 
@@ -364,6 +453,22 @@ describe('opencode buildArgs', () => {
     const args = adapter.buildArgs({ sessionId: 'sess-6', resume: true });
     expect(args).not.toContain('sess-6');
     expect(args).not.toContain('--resume');
+  });
+});
+
+describe('pi buildArgs', () => {
+  const adapter = createPiAdapter('/usr/bin/pi');
+
+  it('launches Pi native TUI with session id and tools', () => {
+    const args = adapter.buildArgs({ sessionId: 'sess-pi', resume: false, initialPrompt: 'hello pi' });
+    expect(adapter.resolvedBin).toBe('/usr/bin/pi');
+    expect(args).toContain('--session-id');
+    expect(args[args.indexOf('--session-id') + 1]).toBe('sess-pi');
+    expect(args).toContain('--tools');
+    expect(args[args.indexOf('--tools') + 1]).toBe('read,bash,edit,write,grep,find,ls');
+    expect(args.at(-1)).toBe('hello pi');
+    expect(adapter.passesInitialPromptViaArgs).toBe(true);
+    expect(adapter.altScreen).toBe(true);
   });
 });
 
@@ -568,6 +673,14 @@ describe('completionPattern', () => {
   it('hermes has no completionPattern', () => {
     expect(createHermesAdapter('/bin/hermes').completionPattern).toBeUndefined();
   });
+
+  it('pi has no completionPattern', () => {
+    expect(createPiAdapter('/bin/pi').completionPattern).toBeUndefined();
+  });
+
+  it('copilot has no completionPattern', () => {
+    expect(createCopilotAdapter('/bin/copilot').completionPattern).toBeUndefined();
+  });
 });
 
 describe('readyPattern', () => {
@@ -627,6 +740,14 @@ describe('readyPattern', () => {
   it('hermes has no readyPattern', () => {
     expect(createHermesAdapter('/bin/hermes').readyPattern).toBeUndefined();
   });
+
+  it('pi has no readyPattern', () => {
+    expect(createPiAdapter('/bin/pi').readyPattern).toBeUndefined();
+  });
+
+  it('copilot has no readyPattern', () => {
+    expect(createCopilotAdapter('/bin/copilot').readyPattern).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -658,6 +779,8 @@ describe('systemHints', () => {
     ['antigravity', () => createAntigravityAdapter('/bin/agy')],
     ['mtr', () => createMtrAdapter('/bin/mtr')],
     ['hermes', () => createHermesAdapter('/bin/hermes')],
+    ['pi', () => createPiAdapter('/bin/pi')],
+    ['copilot', () => createCopilotAdapter('/bin/copilot')],
   ];
 
   it.each(nonClaudeAdapters)('%s systemHints include botmux send routing guidance', (_name, factory) => {
@@ -684,6 +807,8 @@ describe('id property', () => {
     ['mtr', () => createMtrAdapter('/bin/mtr')],
     ['hermes', () => createHermesAdapter('/bin/hermes')],
     ['mira', () => createMiraAdapter()],
+    ['pi', () => createPiAdapter('/bin/pi')],
+    ['copilot', () => createCopilotAdapter('/bin/copilot')],
   ];
 
   it.each(expected)('adapter id is "%s"', (expectedId, factory) => {
@@ -738,6 +863,14 @@ describe('altScreen property', () => {
 
   it('mira does not use alt screen', () => {
     expect(createMiraAdapter().altScreen).toBe(false);
+  });
+
+  it('pi native TUI uses alt screen', () => {
+    expect(createPiAdapter('/bin/pi').altScreen).toBe(true);
+  });
+
+  it('copilot uses alt screen (Ink TUI)', () => {
+    expect(createCopilotAdapter('/bin/copilot').altScreen).toBe(true);
   });
 });
 
@@ -821,4 +954,18 @@ describe('buildResumeCommand', () => {
       .toBe('agy --conversation cid-uuid');
     expect(a.buildResumeCommand?.({ sessionId: 'bm-ag' })).toBeNull();
   });
+
+  it('pi emits `pi --session-id <sessionId>`', () => {
+    const a = createPiAdapter('/bin/pi');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-pi', cliSessionId: 'ignored' }))
+      .toBe('pi --session-id bm-pi');
+  });
+
+  it('copilot emits `copilot --resume <cliSessionId>` when known, null otherwise', () => {
+    const a = createCopilotAdapter('/bin/copilot');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-cp', cliSessionId: 'copilot-sess-1' }))
+      .toBe('copilot --resume copilot-sess-1');
+    expect(a.buildResumeCommand?.({ sessionId: 'bm-cp' })).toBeNull();
+  });
+
 });

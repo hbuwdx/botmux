@@ -14,7 +14,7 @@
  */
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { drainTranscript, joinAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -28,10 +28,12 @@ import {
   type PidFollowResult,
 } from './services/bridge-rotation-policy.js';
 import { CodexBridgeQueue } from './services/codex-bridge-queue.js';
-import { drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn } from './services/codex-transcript.js';
+import { drainCodexRollout, findCodexRolloutBySessionId, findCodexRolloutByPid, splitCodexEventsByCutoff, extractLastCodexTurn, type CodexBridgeEvent } from './services/codex-transcript.js';
+import { findTraexRolloutBySessionId, findTraexRolloutByPid } from './services/traex-transcript.js';
 import { cocoEventsPathForSession, drainCocoEvents, findCocoSessionByPid } from './services/coco-transcript.js';
 import { currentHermesStateOffset, drainHermesStateDb } from './services/hermes-transcript.js';
 import { currentMtrSessionOffset, drainMtrSession, findLatestMtrSessionByDirectory, findMtrSessionById, type MtrTranscriptSource } from './services/mtr-transcript.js';
+import { drainCursorTranscript, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
 import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
@@ -49,7 +51,7 @@ import {
   clamp,
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
-import { createCliAdapterSync } from './adapters/cli/registry.js';
+import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
@@ -69,9 +71,11 @@ import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText } from './utils/transient-snapshot.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
+import { parseWorkerRequestUrl } from './utils/worker-http.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
 import { redactChildEnv } from './utils/child-env.js';
+import { decideSubmitConfirmationAction, type SubmitActivityEvidence } from './services/submit-confirmation.js';
 import { config } from './config.js';
 import * as sessionStore from './services/session-store.js';
 import * as pty from 'node-pty';
@@ -115,12 +119,16 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', opencode: 'OpenCode', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot' };
 function cliName(): string { return CLI_DISPLAY_NAMES[lastInitConfig?.cliId ?? ''] ?? 'CLI'; }
 let isPromptReady = false;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
 let isFlushing = false;
 const pendingMessages: string[] = [];
+/** Alternate submit-confirmation signals. Some CLIs can consume PTY input and
+ *  start work before their history/transcript submit marker is observable. */
+let lastPtyActivityAtMs = 0;
+let lastStructuredBridgeActivityAtMs = 0;
 
 type RuntimeScreenStatus = Exclude<ScreenStatus, 'limited'>;
 
@@ -335,12 +343,14 @@ function formatHeadlessLocalTurnContent(assistantText: string): string | null {
 
 // ─── Bridge fallback marker (non-adopt) ────────────────────────────────────
 //
-// `botmux send` (cli.ts cmdSend) appends a line `{sentAtMs, messageId}\n` to
+// `botmux send` (cli.ts cmdSend) appends a line
+// `{sentAtMs, messageId, contentLength?}\n` to
 // `<DATA_DIR>/turn-sends/<sid>.jsonl` every time the model successfully posts
 // a reply to its OWN session thread. The worker reads these markers at idle
-// and suppresses transcript-driven final_output for any turn whose time
-// window already contains a send — i.e. the model didn't forget, no fallback
-// needed. Append-only over a shared file (instead of a per-turn marker) is
+// and suppresses transcript-driven final_output for any turn whose time window
+// already contains a send that appears to cover the same final answer — i.e.
+// the model didn't forget, no fallback needed. Append-only over a shared file
+// (instead of a per-turn marker) is
 // type-ahead safe: type-ahead'd turns each have their own [markTimeMs,
 // nextTurn.markTimeMs) window, and a stray send only fills its own bucket.
 // This relies on each turn's markTimeMs reflecting when it ACTUALLY started
@@ -370,6 +380,13 @@ function readSendMarkers(): BridgeSendMarker[] {
     log(`Bridge marker read failed: ${err.message}`);
     return [];
   }
+}
+
+function submitActivityEvidenceSince(sinceMs: number): SubmitActivityEvidence | undefined {
+  if (lastPtyActivityAtMs > sinceMs) return 'pty-output';
+  if (lastStructuredBridgeActivityAtMs > sinceMs) return 'structured-transcript';
+  if (readSendMarkers().some(m => m.sentAtMs >= sinceMs)) return 'botmux-send';
+  return undefined;
 }
 
 function clearSendMarkers(): void {
@@ -1100,6 +1117,7 @@ function bridgeIngest(): void {
   const result = drainTranscript(bridgeJsonlPath, bridgeOffset);
   bridgeOffset = result.newOffset;
   bridgePendingTail = result.pendingTail;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   bridgeQueue.ingest(result.events, bridgeJsonlPath);
 }
 
@@ -1385,11 +1403,20 @@ function drainPathInto(path: string, fromOffset: number): { offset: number; tail
 function codexBridgeFallbackActive(): boolean {
   // True for transcript-backed CLIs whose final output can be harvested
   // when the model forgets to call `botmux send`.
-  return lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'coco' || lastInitConfig?.cliId === 'hermes' || lastInitConfig?.cliId === 'mtr';
+  const id = lastInitConfig?.cliId;
+  if (id === 'codex' || id === 'traex' || id === 'coco' || id === 'hermes' || id === 'mtr') return true;
+  // Cursor only harvests its transcript in adopt mode: a botmux-spawned
+  // cursor session carries the botmux skill and replies via `botmux send`,
+  // and we never resolve a transcript path for it — so leave that flow
+  // (screen capture + botmux send) untouched and scope the bridge to adopt.
+  if (id === 'cursor') return lastInitConfig?.adoptMode === true;
+  return false;
 }
 
+// Both Codex and TRAE share the same rollout JSONL layout (response_item
+// messages), so drainCodexRollout works for both.
 function structuredBridgeIsCodex(): boolean {
-  return lastInitConfig?.cliId === 'codex';
+  return lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'traex';
 }
 
 function structuredBridgeIsHermes(): boolean {
@@ -1400,8 +1427,13 @@ function structuredBridgeIsMtr(): boolean {
   return lastInitConfig?.cliId === 'mtr';
 }
 
+function codexBridgeIsCursor(): boolean {
+  return lastInitConfig?.cliId === 'cursor';
+}
+
 function structuredBridgeIngestPath(path: string, offset: number) {
   if (structuredBridgeIsCodex()) return drainCodexRollout(path, offset);
+  if (codexBridgeIsCursor()) return drainCursorTranscript(path, offset);
   if (structuredBridgeIsHermes()) {
     const result = drainHermesStateDb(offset);
     return { events: result.events, newOffset: result.newOffset, pendingTail: '' };
@@ -1447,6 +1479,29 @@ function codexBridgeStartTimer(): void {
         if (isPromptReady) emitReadyCodexTurns();
         return;
       }
+      if (codexBridgeIsCursor()) {
+        // Late-attach: the transcript usually exists at adopt time (the
+        // session is already running), so cursorBridgeAttach in setup wins.
+        // This covers the rare race where pid→chatId resolved but the JSONL
+        // hadn't been created yet. Resolution order: chatId (cliSessionId) →
+        // path; then adopt pid → store.db fd → chatId → path.
+        if (!codexBridgeRolloutPath) {
+          let path = codexBridgePendingSessionId
+            ? findCursorTranscriptByChatId(codexBridgePendingSessionId)
+            : undefined;
+          if (!path && codexAdoptPendingPid) {
+            path = findCursorTranscriptByPid(codexAdoptPendingPid)?.path;
+          }
+          if (path) {
+            codexBridgePendingSessionId = undefined;
+            codexAdoptPendingPid = undefined;
+            cursorBridgeAttach(path, cursorLateAttachMode(path));
+          }
+        }
+        codexBridgeIngest();
+        if (isPromptReady) emitReadyCodexTurns();
+        return;
+      }
       if (!codexBridgeRolloutPath) {
         // Two discovery paths, in order: cliSessionId (known via writeInput
         // result for non-adopt or daemon-side probe for adopt) → exact
@@ -1458,17 +1513,25 @@ function codexBridgeStartTimer(): void {
         // by sid suffix; CoCo's events.jsonl path is deterministic from
         // sid, so the lookup is just a path computation + existence check.
         const isCoco = lastInitConfig?.cliId === 'coco';
+        const isTraex = lastInitConfig?.cliId === 'traex';
         let path: string | undefined;
         if (codexBridgePendingSessionId) {
-          path = isCoco
-            ? cocoEventsPathForSession(codexBridgePendingSessionId)
-            : findCodexRolloutBySessionId(codexBridgePendingSessionId);
-          if (path && isCoco && !existsSync(path)) path = undefined;
+          if (isCoco) {
+            path = cocoEventsPathForSession(codexBridgePendingSessionId);
+            if (path && !existsSync(path)) path = undefined;
+          } else if (isTraex) {
+            path = findTraexRolloutBySessionId(codexBridgePendingSessionId);
+          } else {
+            path = findCodexRolloutBySessionId(codexBridgePendingSessionId);
+          }
         }
         if (!path && codexAdoptPendingPid) {
           if (isCoco) {
             const probed = findCocoSessionByPid(codexAdoptPendingPid);
             if (probed && existsSync(probed.eventsPath)) path = probed.eventsPath;
+          } else if (isTraex) {
+            const probed = findTraexRolloutByPid(codexAdoptPendingPid);
+            if (probed) path = probed.path;
           } else {
             const probed = findCodexRolloutByPid(codexAdoptPendingPid);
             if (probed) path = probed.path;
@@ -1506,6 +1569,7 @@ function hermesBridgeIngest(): void {
   if (!hermesBridgeBaselineDone) return;
   const result = drainHermesStateDb(hermesBridgeOffset);
   hermesBridgeOffset = result.newOffset;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   if (result.events.some(e => e.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
@@ -1543,13 +1607,14 @@ function mtrBridgeIngest(): void {
   if (!mtrBridgeBaselineDone || !mtrBridgeSource) return;
   const result = drainMtrSession(mtrBridgeSource, mtrBridgeOffset);
   mtrBridgeOffset = result.newOffset;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   if (result.events.some(e => e.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
   }
 }
 
-function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fresh-empty' | 'split-live'): void {
+function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'baseline-existing-skip-tail' | 'fresh-empty' | 'split-live'): void {
   codexBridgeRolloutPath = rolloutPath;
   if (mode === 'fresh-empty') {
     // Brand-new session OR late-attach right after first submit. Either
@@ -1588,6 +1653,13 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fre
     codexBridgePendingTail = '';
     codexBridgeBaselineDone = true;
     log(`Codex bridge split-live degraded to fresh (file missing): ${rolloutPath}`);
+  } else if (mode === 'baseline-existing-skip-tail' && existsSync(rolloutPath)) {
+    let size = 0;
+    try { size = statSync(rolloutPath).size; } catch { /* degrade below */ }
+    codexBridgeOffset = size;
+    codexBridgePendingTail = '';
+    codexBridgeBaselineDone = true;
+    log(`Codex bridge baselined: ${rolloutPath} (offset=${codexBridgeOffset}, skipTail=true)`);
   } else if (existsSync(rolloutPath)) {
     const cursor = baselineJsonlCursor(rolloutPath);
     codexBridgeOffset = cursor.newOffset;
@@ -1617,6 +1689,40 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'fre
   codexBridgeStartTimer();
 }
 
+type CursorAttachMode = 'baseline-existing' | 'fresh-empty';
+
+function cursorLateAttachMode(path: string): CursorAttachMode {
+  const start = codexAdoptStartMs;
+  if (start !== undefined) {
+    try {
+      const birthtimeMs = statSync(path).birthtimeMs;
+      // Cursor often creates the agent-transcript file lazily on the first
+      // post-adopt submit. In that case the first user line is live and must
+      // be ingested from byte 0 rather than swallowed as history.
+      if (Number.isFinite(birthtimeMs) && birthtimeMs >= start - 5_000) return 'fresh-empty';
+    } catch { /* fall back to history-safe baseline */ }
+  }
+  return 'baseline-existing';
+}
+
+/** Attach the Cursor adopt bridge. Cursor's JSONL has no per-event
+ *  timestamp, so existing transcripts are baselined by byte offset. Cursor
+ *  restore intentionally skips any partial tail present at attach time: it is
+ *  old in-flight output and must not be attributed to the next Lark turn. If
+ *  the transcript is created after /adopt, attach fresh so the first
+ *  post-adopt Lark/user turn can still be attributed. */
+function cursorBridgeAttach(path: string, mode: CursorAttachMode = 'baseline-existing'): void {
+  if (mode === 'baseline-existing' && existsSync(path)) {
+    try {
+      const full = drainCursorTranscript(path, 0);
+      maybeEmitCodexAdoptPreamble(full.events);
+    } catch (err: any) {
+      log(`Cursor bridge preamble drain failed: ${err.message}`);
+    }
+  }
+  codexBridgeAttach(path, mode === 'baseline-existing' ? 'baseline-existing-skip-tail' : mode);
+}
+
 /** Called from flushPending after writeInput first returns a cliSessionId.
  *  Tries to locate the rollout file immediately; if it's not on disk yet,
  *  remembers the sid so the 1s poller can keep retrying. */
@@ -1633,7 +1739,22 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
     }
     return;
   }
-  const path = findCodexRolloutBySessionId(cliSessionId);
+  if (codexBridgeIsCursor()) {
+    // Cursor's cliSessionId is the chatId — the same UUID naming the
+    // agent-transcript JSONL, so it resolves the path directly.
+    const cursorPath = findCursorTranscriptByChatId(cliSessionId);
+    if (cursorPath) {
+      codexBridgePendingSessionId = undefined;
+      cursorBridgeAttach(cursorPath, cursorLateAttachMode(cursorPath));
+    } else {
+      codexBridgePendingSessionId = cliSessionId;
+      codexBridgeStartTimer();
+    }
+    return;
+  }
+  const path = lastInitConfig?.cliId === 'traex'
+    ? findTraexRolloutBySessionId(cliSessionId)
+    : findCodexRolloutBySessionId(cliSessionId);
   if (path) {
     codexBridgePendingSessionId = undefined;
     codexBridgeAttach(path, 'fresh-empty');
@@ -1656,6 +1777,7 @@ function codexBridgeIngest(): void {
   const result = structuredBridgeIngestPath(codexBridgeRolloutPath, codexBridgeOffset);
   codexBridgeOffset = result.newOffset;
   codexBridgePendingTail = result.pendingTail;
+  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
   codexBridgeQueue.ingest(result.events);
   // Transcript-driven idle: an `assistant_final` event is the CLI declaring
   // end-of-turn, far more reliable than the screen-pattern heuristic
@@ -1710,7 +1832,7 @@ function emitReadyCodexTurns(): void {
     const turn = ready[i];
     if (!turn.finalText) continue;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
-    if (shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode)) {
+    if (shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: turn.finalText }, nextBoundaryMs, markers, adoptMode)) {
       log(`Codex bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (gate)`);
       continue;
     }
@@ -1990,6 +2112,7 @@ let pendingShotTimer: ReturnType<typeof setTimeout> | null = null;
 let lastShotHash = '';
 let larkAppIdForUpload = '';
 let larkAppSecretForUpload = '';
+let larkBrandForUpload: 'feishu' | 'lark' = 'feishu';
 
 function startScreenshotLoop(): void {
   stopScreenshotLoop();
@@ -2082,7 +2205,7 @@ async function captureAndUpload(): Promise<void> {
 
   let imageKey: string;
   try {
-    imageKey = await uploadImageBuffer(larkAppIdForUpload, larkAppSecretForUpload, png);
+    imageKey = await uploadImageBuffer(larkAppIdForUpload, larkAppSecretForUpload, png, larkBrandForUpload);
   } catch (err: any) {
     logError(`Screenshot upload failed: ${err?.message ?? err}`);
     return;
@@ -2304,8 +2427,11 @@ function handleCodexAppMarker(body: string): void {
     const startedAtMs = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : undefined;
     const completedAtMs = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : Date.now();
     if (startedAtMs !== undefined) {
-      const sentByModel = readSendMarkers().some(m =>
-        m.sentAtMs >= startedAtMs && m.sentAtMs <= completedAtMs + 5_000,
+      const sentByModel = shouldSuppressBridgeEmit(
+        { markTimeMs: startedAtMs, isLocal: false, finalText: payload.content },
+        completedAtMs + 5_001,
+        readSendMarkers(),
+        false,
       );
       if (sentByModel) {
         log(`${cliName()} final_output suppressed (model already called botmux send)`);
@@ -2361,6 +2487,7 @@ function splitCodexAppControl(data: string): string {
 function onPtyData(data: string): void {
   data = splitCodexAppControl(data);
   if (data.length === 0) return;
+  lastPtyActivityAtMs = Date.now();
   captureWorkflowTranscript(data);
   renderer?.write(data);
 
@@ -2491,42 +2618,67 @@ function scheduleSubmitFailureNotify(
     }
   };
   if (failureReason) {
+    const action = decideSubmitConfirmationAction({
+      failureReason,
+      recheckSubmitted: false,
+      usageLimitDetected: false,
+    });
     dropBridgeMark();
-    log(`writeInput: submit impossible — notifying user immediately. reason="${failureReason}" preview="${preview}"`);
+    const reason = action.kind === 'notify-hard-failure' ? action.reason : failureReason;
+    log(`writeInput: submit impossible — notifying user immediately. reason="${reason}" preview="${preview}"`);
     send({
       type: 'user_notify',
-      message: `⚠️ 刚才那条消息没有写入 ${cliName()}，因为当前按键配置无法从终端自动提交。\n原因：${failureReason}\n请调整 Claude Code Chat keybinding 后重发。\n开头：${preview}`,
+      message: `⚠️ 刚才那条消息没有写入 ${cliName()}，因为当前按键配置无法从终端自动提交。\n原因：${reason}\n请调整 Claude Code Chat keybinding 后重发。\n开头：${preview}`,
     });
     return;
   }
+  const activityBaselineMs = Date.now();
   log(`writeInput: submit not confirmed after retries — deferred ${SUBMIT_DEFERRED_RECHECK_MS}ms recheck queued. preview="${preview}"`);
   setTimeout(async () => {
+    let recheckSubmitted = false;
+    let cliSessionId: string | undefined;
     if (recheck) {
       try {
         const recheckResult = await recheck();
-        const recheckSubmitted = typeof recheckResult === 'boolean'
+        recheckSubmitted = typeof recheckResult === 'boolean'
           ? recheckResult
           : recheckResult.submitted === true;
-        if (recheckSubmitted) {
-          const cliSessionId = typeof recheckResult === 'object' && recheckResult && typeof recheckResult.cliSessionId === 'string'
-            ? recheckResult.cliSessionId
-            : undefined;
-          if (cliSessionId) {
-            persistCliSessionId(cliSessionId);
-            if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cliSessionId);
-          }
-          log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
-          return;
-        }
+        cliSessionId = typeof recheckResult === 'object' && recheckResult && typeof recheckResult.cliSessionId === 'string'
+          ? recheckResult.cliSessionId
+          : undefined;
       } catch (err: any) {
         log(`Deferred recheck threw (${err?.message ?? err}); falling through to warning.`);
       }
     }
-    if (usageLimitTracker.detectedThisTurn(turnSeq)) {
-      dropBridgeMark();
-      log(`Deferred recheck missing but usage limit was detected for this turn — suppressing submit warning. preview="${preview}"`);
-      return;
+
+    const action = decideSubmitConfirmationAction({
+      recheckSubmitted,
+      usageLimitDetected: usageLimitTracker.detectedThisTurn(turnSeq),
+      activityEvidence: submitActivityEvidenceSince(activityBaselineMs),
+    });
+
+    switch (action.kind) {
+      case 'suppress-confirmed':
+        if (cliSessionId) {
+          persistCliSessionId(cliSessionId);
+          if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cliSessionId);
+        }
+        log(`Deferred recheck found submit in ${transcriptLabel} — suppressing warning. preview="${preview}"`);
+        return;
+      case 'suppress-usage-limit':
+        dropBridgeMark();
+        log(`Deferred recheck missing but usage limit was detected for this turn — suppressing submit warning. preview="${preview}"`);
+        return;
+      case 'suppress-active':
+        log(`Deferred recheck missing but later ${action.evidence} shows ${cliName()} is active — suppressing submit warning. preview="${preview}"`);
+        return;
+      case 'notify-hard-failure':
+        // failureReason is handled synchronously above.
+        return;
+      case 'notify-stuck':
+        break;
     }
+
     dropBridgeMark();
     log(`Deferred recheck still missing — notifying user. preview="${preview}"`);
     send({
@@ -2770,6 +2922,25 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
       codexAdoptPendingPid = cfg.adoptCliPid;
       codexBridgeStartTimer();
     }
+  } else if (cfg.cliId === 'traex') {
+    // TRAE rollout format is byte-identical to Codex; only the directory
+    // layout (and therefore the finder functions) differ.
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    let rolloutPath: string | undefined;
+    if (cfg.cliSessionId) rolloutPath = findTraexRolloutBySessionId(cfg.cliSessionId);
+    if (!rolloutPath && cfg.adoptCliPid) {
+      const probed = findTraexRolloutByPid(cfg.adoptCliPid);
+      if (probed) rolloutPath = probed.path;
+    }
+    if (rolloutPath) {
+      codexBridgeAttach(rolloutPath, 'split-live');
+    } else {
+      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+      codexAdoptPendingPid = cfg.adoptCliPid;
+      codexBridgeStartTimer();
+    }
   } else if (cfg.cliId === 'coco') {
     const adoptStartMs = Date.now();
     codexAdoptStartMs = adoptStartMs;
@@ -2811,20 +2982,46 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
     } else {
       codexBridgeStartTimer();
     }
+  } else if (cfg.cliId === 'cursor') {
+    const adoptStartMs = Date.now();
+    codexAdoptStartMs = adoptStartMs;
+    // Cursor JSONL lacks per-event timestamps, but adopt still needs parity
+    // with other transcript bridges: direct terminal input should be surfaced
+    // as a local-turn card in Lark. Baseline/offset handling above keeps
+    // pre-adopt history out of the queue; worst-case mirror replay is a
+    // duplicate local-turn message rather than lost local input.
+    codexBridgeQueue.setLocalTurns(true, adoptStartMs);
+    // Resolve the transcript: cliSessionId (= Cursor chatId) when discovery
+    // captured it, else the adopt pid via its open store.db fd. Cursor lacks
+    // per-event timestamps, so cursorBridgeAttach baselines by byte offset
+    // rather than the timestamp-cutoff split-live the other CLIs use.
+    let path: string | undefined;
+    if (cfg.cliSessionId) path = findCursorTranscriptByChatId(cfg.cliSessionId);
+    if (!path && cfg.adoptCliPid) {
+      const probed = findCursorTranscriptByPid(cfg.adoptCliPid);
+      if (probed) path = probed.path;
+    }
+    if (path) {
+      cursorBridgeAttach(path);
+    } else {
+      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+      codexAdoptPendingPid = cfg.adoptCliPid;
+      codexBridgeStartTimer();
+    }
   }
 }
 
 function adoptIdleAdapter(cfg: Extract<DaemonToWorker, { type: 'init' }>): CliAdapter {
   return cfg.bridgeJsonlPath
     ? createCliAdapterSync('claude-code', undefined)
-    : cfg.cliId === 'codex' || cfg.cliId === 'coco' || cfg.cliId === 'mtr'
+    : cfg.cliId === 'codex' || cfg.cliId === 'traex' || cfg.cliId === 'coco' || cfg.cliId === 'mtr'
       ? createCliAdapterSync(cfg.cliId, undefined)
       : ({ completionPattern: undefined, readyPattern: undefined } as CliAdapter);
 }
 
 function setupAdoptInputAdapter(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
-  if (cfg.cliId === 'codex') {
-    cliAdapter = createCliAdapterSync('codex', cfg.cliPathOverride);
+  if (cfg.cliId === 'codex' || cfg.cliId === 'traex') {
+    cliAdapter = createCliAdapterSync(cfg.cliId, cfg.cliPathOverride);
   } else if (cfg.cliId === 'mtr') {
     cliAdapter = createCliAdapterSync('mtr', cfg.cliPathOverride);
   }
@@ -3055,6 +3252,25 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`Re-attaching to existing ${effectiveBackendType} session: ${persistentSessionName} (requested CLI: ${cliAdapter.resolvedBin})`);
   } else {
     log(`Spawning fresh CLI: ${cliAdapter.resolvedBin} ${args.join(' ')} (cwd: ${cfg.workingDir})`);
+
+    // Pre-flight: resolvedBin resolves here (lazy). If resolveCommand fell back
+    // to a bare name and it isn't on the worker's PATH either, the spawn would
+    // fail repeatedly and surface only as a generic crash-loop ("X crashed N
+    // times"), with no hint about WHY. Instead surface ONE clear, reproducible
+    // message and stop — the user can fix PATH / install the CLI and retry.
+    const wantBin = cliAdapter.resolvedBin;
+    if (!locateOnPath(wantBin)) {
+      log(`CLI binary not found: ${wantBin} (PATH=${process.env.PATH ?? ''})`);
+      const probe = isAbsolute(wantBin) ? `ls -l ${wantBin}` : `which ${wantBin}`;
+      send({
+        type: 'user_notify',
+        message:
+          `无法启动 ${cliName()}：找不到可执行文件「${wantBin}」。\n` +
+          `请在运行 botmux daemon 的这台机器上确认它已安装并在 PATH 中（自查：${probe}），然后重发消息重试。\n` +
+          `当前 daemon PATH=${process.env.PATH ?? '(空)'}`,
+      });
+      return;
+    }
   }
 
   // Build the child env. redactChildEnv() DELETES the keys that must not leak
@@ -3196,6 +3412,22 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     } else {
       codexBridgeStartTimer();
     }
+  } else if (cfg.cliId === 'traex') {
+    // TRAE: same rollout shape as Codex, different finder path. For a fresh
+    // spawn (no cliSessionId yet) we just arm the poller; writeInput will
+    // surface the cliSessionId on the first successful submit and trigger
+    // codexBridgeNotifyCliSessionId → rollout attach.
+    if (cfg.cliSessionId) {
+      const rolloutPath = findTraexRolloutBySessionId(cfg.cliSessionId);
+      if (rolloutPath) {
+        codexBridgeAttach(rolloutPath, 'baseline-existing');
+      } else {
+        codexBridgePendingSessionId = cfg.cliSessionId;
+        codexBridgeStartTimer();
+      }
+    } else {
+      codexBridgeStartTimer();
+    }
   } else if (cfg.cliId === 'coco') {
     const eventsPath = cocoEventsPathForSession(cfg.sessionId);
     codexBridgeAttach(eventsPath, cfg.resume ? 'baseline-existing' : 'fresh-empty');
@@ -3242,15 +3474,22 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   }
 
   // Fallback: if the CLI takes too long to show its prompt (e.g. slow
-  // plugin init), unblock screen updates so the card doesn't stay at
-  // "启动中" forever.  markNewTurn() sets a clean baseline at the current
-  // cursor position so only content written *after* this point appears in
-  // the card.
+  // plugin init, or a spinner blocks the idle detector), unblock screen
+  // updates AND deliver any queued prompts so the first user message
+  // isn't stranded until the second message arrives. markNewTurn() sets a
+  // clean baseline at the current cursor position so only content written
+  // *after* this point appears in the card.
   setTimeout(() => {
     if (awaitingFirstPrompt) {
       awaitingFirstPrompt = false;
       renderer?.markNewTurn();
-      log('First prompt timeout — enabling screen updates');
+      log('First prompt timeout — enabling screen updates and flushing queued messages');
+      // For type-ahead adapters (Codex/CoCo/TRAE/Claude) the TUI is booted
+      // enough to park input even if the idle detector hasn't fired yet.
+      // Directly invoking markPromptReady() would claim the CLI is idle
+      // while it's still mid-boot, so flushPending() alone is safer — it
+      // respects typeAheadAllowed and drains pendingMessages now.
+      if (cliAdapter?.supportsTypeAhead) flushPending();
     }
   }, 15_000);
 }
@@ -3285,7 +3524,13 @@ function killCli(): void {
 function startWebServer(host: string, preferredPort?: number): Promise<number> {
   return new Promise((resolve, reject) => {
     httpServer = createHttpServer((req, res) => {
-      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const url = parseWorkerRequestUrl(req);
+      if (!url) {
+        log(`Bad worker HTTP URL rejected: ${JSON.stringify(req.url ?? '')}`);
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Request');
+        return;
+      }
       const hasWrite = url.searchParams.get('token') === writeToken;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(getTerminalHtml(hasWrite));
@@ -3297,7 +3542,13 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
       wsClients.add(ws);
 
       // Check token from query string for write access
-      const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+      const url = parseWorkerRequestUrl(req);
+      if (!url) {
+        log(`Bad worker WS URL rejected: ${JSON.stringify(req.url ?? '')}`);
+        wsClients.delete(ws);
+        ws.close(1008, 'Bad Request');
+        return;
+      }
       const hasWrite = url.searchParams.get('token') === writeToken;
       if (hasWrite) authedClients.add(ws);
       log(`WS client connected (total: ${wsClients.size}, write: ${hasWrite})`);
@@ -3788,6 +4039,8 @@ process.on('message', async (raw: unknown) => {
       // Capture credentials for direct image upload from worker
       larkAppIdForUpload = msg.larkAppId;
       larkAppSecretForUpload = msg.larkAppSecret;
+      // brand 决定截图上传打哪个域（feishu / larksuite）。缺省 feishu。
+      larkBrandForUpload = msg.brand === 'lark' ? 'lark' : 'feishu';
       // Resolve render dimensions BEFORE startScreenUpdates() — the
       // headless xterm and PNG canvas need to know the source pane size
       // up-front. Setting them later (after the renderer was built at
@@ -3801,7 +4054,7 @@ process.on('message', async (raw: unknown) => {
       try {
         let port = 0;
         if (!isWorkflowWorker()) {
-          port = await startWebServer('0.0.0.0', msg.webPort);
+          port = await startWebServer(config.web.workerHost, msg.webPort);
           startScreenUpdates();
           startScreenAnalyzer();
         } else {
@@ -3809,7 +4062,7 @@ process.on('message', async (raw: unknown) => {
           // workflow dashboard can observe in-flight subagents.  Keep the
           // chat-side features disabled: no screen cards, no analyzer, no
           // sessionStore writes.
-          port = await startWebServer('0.0.0.0', msg.webPort);
+          port = await startWebServer(config.web.workerHost, msg.webPort);
           log('Workflow worker mode: web terminal enabled; skipping screen updates and screen analyzer');
         }
         spawnCli(msg);
@@ -3852,8 +4105,17 @@ process.on('message', async (raw: unknown) => {
           // in-flight events from a local-typed prior turn close before
           // this Lark turn's fingerprint window opens. Mark works even
           // pre-attach (queue is path-agnostic).
-          try { codexBridgeIngest(); } catch { /* best effort */ }
-          codexBridgeMarkPendingTurn(content);
+          if (codexBridgeIsCursor()) {
+            // Cursor may append the current Lark/user line to its transcript
+            // before this IPC message is handled. Mark first so that preexisting
+            // current-line can still fingerprint-match instead of being marked
+            // seen as an unmatched event.
+            codexBridgeMarkPendingTurn(content);
+            try { codexBridgeIngest(); } catch { /* best effort */ }
+          } else {
+            try { codexBridgeIngest(); } catch { /* best effort */ }
+            codexBridgeMarkPendingTurn(content);
+          }
         }
         // Adopt mode write:
         //   - codex routes through cliAdapter.writeInput so the adapter's
@@ -3866,7 +4128,7 @@ process.on('message', async (raw: unknown) => {
         //     path, and the other CLIs' adopt flows haven't surfaced
         //     this submit-detection issue.
         if (backend) {
-          if (lastInitConfig?.cliId === 'codex' && cliAdapter) {
+          if ((lastInitConfig?.cliId === 'codex' || lastInitConfig?.cliId === 'traex') && cliAdapter) {
             // writeInput is async but we're already inside an async
             // message handler. Errors are best-effort logged; the bridge
             // ingest path is unaffected because mark already happened

@@ -10,6 +10,7 @@ import { resolveUserToken } from '../../utils/user-token.js';
 import { listObservedBots } from '../../services/observed-bots-store.js';
 import { getBotCapability } from '../../services/bot-profile-store.js';
 import { resolveTeamRoleFile } from '../../core/role-resolver.js';
+import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 
 type LarkRequestParams = Record<string, string | number | boolean | undefined>;
 
@@ -39,7 +40,7 @@ function getAllBotClients() {
     allBotClients = loadBotConfigs().map((cfg) => ({
       appId: cfg.larkAppId,
       cliId: cfg.cliId,
-      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, loggerLevel: LoggerLevel.error }),
+      client: new Client({ appId: cfg.larkAppId, appSecret: cfg.larkAppSecret, domain: sdkDomain(normalizeBrand(cfg.brand)), loggerLevel: LoggerLevel.error }),
     }));
   }
   return allBotClients;
@@ -52,6 +53,21 @@ export class MessageWithdrawnError extends Error {
   constructor(messageId: string) {
     super(`Message ${messageId} has been withdrawn`);
     this.name = 'MessageWithdrawnError';
+  }
+}
+
+/**
+ * Thrown ONLY when a resource download genuinely needs (re-)authorization: no
+ * usable User Token on disk, or the User Token was rejected as unauthorized
+ * (HTTP 401). Callers gate the "/login" prompt on `instanceof` this — NOT on a
+ * substring of the message — so an ordinary download failure (4xx/5xx for a
+ * cross-tenant / card-image / withdrawn resource) is no longer misreported as
+ * "missing User Token, please /login" even though a valid token was used.
+ */
+export class UserTokenMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UserTokenMissingError';
   }
 }
 
@@ -587,15 +603,16 @@ export async function downloadMessageResource(larkAppId: string, messageId: stri
 
   // Fallback: User Token from botmux OAuth (/login)
   const bot = getBot(larkAppId);
-  const userToken = await resolveUserToken(bot.config.larkAppId, bot.config.larkAppSecret);
+  const brand = normalizeBrand(bot.config.brand);
+  const userToken = await resolveUserToken(bot.config.larkAppId, bot.config.larkAppSecret, brand);
   if (!userToken) {
-    throw new Error(
+    throw new UserTokenMissingError(
       `App Token 无法下载此资源，且未找到可用的 User Token。` +
       `请在话题中发送 /login 完成授权后重试。`
     );
   }
 
-  await downloadWithUserToken(userToken, messageId, fileKey, type, savePath);
+  await downloadWithUserToken(userToken, messageId, fileKey, type, savePath, brand);
   logger.info(`Downloaded ${type} ${fileKey} → ${savePath} (via User Token)`);
 }
 
@@ -614,14 +631,21 @@ async function downloadWithAppToken(larkAppId: string, messageId: string, fileKe
   await writeResourceToDisk(res, savePath);
 }
 
-async function downloadWithUserToken(userToken: string, messageId: string, fileKey: string, type: 'image' | 'file', savePath: string): Promise<void> {
-  const url = `https://open.feishu.cn/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${type}`;
+async function downloadWithUserToken(userToken: string, messageId: string, fileKey: string, type: 'image' | 'file', savePath: string, brand: Brand = 'feishu'): Promise<void> {
+  const url = `${larkHosts(brand).openApi}/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${type}`;
   const res = await fetch(url, {
     headers: { Authorization: `Bearer ${userToken}` },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`User Token download failed: HTTP ${res.status} ${body}`);
+    // 401 = the token itself was rejected (expired / wrong scope) → genuinely
+    // needs re-login. Any other status (403/404/4xx/5xx) means the token is
+    // fine but THIS resource can't be fetched (cross-tenant, card image,
+    // withdrawn) — surface as a plain failure so it does NOT trigger /login.
+    if (res.status === 401) {
+      throw new UserTokenMissingError(`User Token 已失效（HTTP 401）。请在话题中发送 /login 重新授权后重试。`);
+    }
+    throw new Error(`Resource download failed: HTTP ${res.status} ${body}`);
   }
   const buf = Buffer.from(await res.arrayBuffer());
   writeFileSync(savePath, buf);
@@ -1106,6 +1130,13 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
   //   2) Otherwise (no/ambiguous match) → append as an external bot.
   try {
     const observedList = listObservedBots(config.session.dataDir, larkAppId, chatId);
+    const latestObservedByName = new Map<string, (typeof observedList)[number]>();
+    for (const o of observedList) {
+      const existing = latestObservedByName.get(o.name);
+      if (!existing || o.lastSeenAt > existing.lastSeenAt) {
+        latestObservedByName.set(o.name, o);
+      }
+    }
     const seenOpenIds = new Set(configured.map(b => b.openId));
     const norm = (s: string) => s.trim().toLowerCase();
     const byName = new Map<string, number[]>();
@@ -1115,7 +1146,7 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
       if (arr) arr.push(i); else byName.set(k, [i]);
     });
 
-    for (const o of observedList) {
+    for (const o of latestObservedByName.values()) {
       if (seenOpenIds.has(o.openId)) continue;
       const matches = byName.get(norm(o.name)) ?? [];
       if (matches.length === 1) {

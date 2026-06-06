@@ -6,24 +6,28 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve, basename } from 'node:path';
 import { config } from '../config.js';
 import { buildTerminalUrl } from './terminal-url.js';
-import { getBot, getAllBots, getBotOpenId } from '../bot-registry.js';
+import { getBot, getAllBots, getBotOpenId, getOwnerOpenId } from '../bot-registry.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
-import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, getCliDisplayName } from '../im/lark/card-builder.js';
+import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSessionClosedCard, buildSlashListCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { deleteMessage, sendMessage, listChatBotMembers, resolveUserUnionId, getChatModeStrict } from '../im/lark/client.js';
+import { chatAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
-import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience } from './worker-pool.js';
+import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
+import { discoverSlashCommands, listMcpServerNames } from './command-discovery.js';
 import { validateWorkingDir } from './working-dir.js';
 import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
+import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
+import { setCardMode } from '../services/card-mode-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
 import { writeRoleFile, deleteRoleFile, resolveRole, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile } from './role-resolver.js';
 import { getBotCapability, setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
@@ -34,7 +38,7 @@ import { t, localeForBot, type Locale } from '../i18n/index.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
-export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/pair', '/login', '/adopt', '/oncall', '/group', '/g', '/relay', '/card']);
+export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/list-slash-command', '/slash']);
 
 /**
  * Daemon commands that act on the chat itself rather than opening a
@@ -44,7 +48,7 @@ export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help'
  * card buttons routable, but for these that record is a phantom conversation
  * that pollutes the dashboard's session list. Handle them without a session.
  */
-export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g']);
+export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/list-slash-command', '/slash']);
 
 /**
  * Slash commands that are forwarded verbatim to the underlying CLI (e.g.
@@ -61,6 +65,28 @@ export const PASSTHROUGH_COMMANDS = new Set([
   // Codex：/btw 向当前会话追加一条旁注/引导消息
   '/btw',
 ]);
+
+/**
+ * Effective passthrough set for a bot: the fixed {@link PASSTHROUGH_COMMANDS}
+ * plus the bot's `customPassthroughCommands` (bots.json). Entries that would
+ * shadow a botmux daemon command are dropped — daemon commands must keep their
+ * daemon semantics, and passthrough is checked BEFORE DAEMON_COMMANDS in the
+ * router, so an un-filtered custom `/status` would hijack the daemon's own.
+ * Unknown / no bot → falls back to the builtin set unchanged.
+ */
+export function resolvePassthroughCommands(larkAppId?: string): Set<string> {
+  const effective = new Set(PASSTHROUGH_COMMANDS);
+  if (!larkAppId) return effective;
+  try {
+    for (const c of getBot(larkAppId).config.customPassthroughCommands ?? []) {
+      if (DAEMON_COMMANDS.has(c)) continue; // never shadow a daemon command
+      effective.add(c);
+    }
+  } catch {
+    /* unknown bot — builtin set only */
+  }
+  return effective;
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -488,6 +514,86 @@ async function handleScheduleCommand(
 
 // ─── Main command handler ────────────────────────────────────────────────────
 
+/**
+ * Handle `/card` (owner-only). Resolves the active session itself, so off/on
+ * work WITHOUT one -- they only toggle the per-chat `noCardChats` config. A
+ * summon (show/bare) needs a live session.
+ *
+ * off  -> suppress the live streaming card for this chat (add to noCardChats);
+ *         status falls back to master's pending-card morph.
+ * on   -> restore cards for this chat (remove from noCardChats).
+ * ''/show -> summon a live card. privateCard -> private ephemeral snapshot
+ *         (fail closed on non-group); otherwise a group-visible live card.
+ * off/on also clear `streamingCardForced` so a prior summon does not
+ * short-circuit `streamingCardDisabled()`.
+ */
+export async function handleCardCommand(
+  rootId: string,
+  larkAppId: string,
+  chatId: string,
+  senderOpenId: string | undefined,
+  content: string,
+  deps: CommandHandlerDeps,
+): Promise<void> {
+  const loc = localeForBot(larkAppId);
+  const reply = (c: string) => deps.sessionReply(rootId, c, undefined, larkAppId);
+
+  const ownerOpenId = getOwnerOpenId(larkAppId);
+  if (!ownerOpenId || !senderOpenId || senderOpenId !== ownerOpenId) {
+    await reply(t('cmd.card.owner_only', undefined, loc));
+    return;
+  }
+
+  const ds = deps.activeSessions.get(sessionKey(rootId, larkAppId));
+  const sub = content.replace(/^\/card\s*/i, '').trim().toLowerCase();
+
+  if (sub === 'off') {
+    const r = await setCardMode(larkAppId, chatId, true);
+    if (ds) ds.streamingCardForced = undefined;
+    await reply(r.ok ? t('cmd.card.off_ok', undefined, loc) : t('cmd.card.fail', { reason: r.reason }, loc));
+    return;
+  }
+  if (sub === 'on') {
+    const r = await setCardMode(larkAppId, chatId, false);
+    if (ds) ds.streamingCardForced = undefined;
+    await reply(r.ok ? t('cmd.card.on_ok', undefined, loc) : t('cmd.card.fail', { reason: r.reason }, loc));
+    return;
+  }
+  if (sub === '' || sub === 'show') {
+    if (!ds) {
+      await reply(t('cmd.no_active_session', undefined, loc));
+      return;
+    }
+    if (getBot(ds.larkAppId).config.privateCard) {
+      const mode = await getChatModeStrict(ds.larkAppId, ds.chatId);
+      if (mode !== 'group') {
+        await reply(t('cmd.card.private_not_group', undefined, loc));
+        return;
+      }
+      const audience = resolvePrivateCardAudience(ds);
+      if (audience.length === 0) {
+        await reply(t('cmd.card.private_no_audience', undefined, loc));
+        return;
+      }
+      const r = await postPrivateSnapshotCard(ds, audience);
+      if (r.notReady) {
+        await reply(t('cmd.card.private_not_ready', undefined, loc));
+      } else if (r.sent === 0) {
+        await reply(t('cmd.card.private_failed', undefined, loc));
+      } else if (r.sent < r.total) {
+        await reply(t('cmd.card.private_partial', { sent: r.sent, total: r.total }, loc));
+      }
+      return;
+    }
+    ds.streamingCardForced = true;
+    const posted = await postFreshStreamingCard(ds, deps.sessionReply);
+    if (!posted) await reply(t('cmd.card.not_ready', undefined, loc));
+    return;
+  }
+
+  await reply(t('cmd.card.usage', undefined, loc));
+}
+
 export async function handleCommand(
   cmd: string,
   rootId: string,
@@ -536,11 +642,42 @@ export async function handleCommand(
             cliResumeCommand,
             loc,
           );
-          await sessionReply(rootId, card, 'interactive');
+          // 「会话已关闭」卡片优先「仅自己可见」：普通群里走 ephemeral 只发给执行
+          // /close 的本人；话题群不支持 ephemeral(18053) 时回退为正常的群内可见回复
+          // ——与流式卡片上「关闭会话」按钮的送达方式保持一致。
+          await deliverEphemeralOrReply(
+            ds,
+            message.senderId,
+            card,
+            'interactive',
+            () => sessionReply(rootId, card, 'interactive'),
+          );
           logger.info(`[${logTag}] Session closed by /close command`);
         } else {
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
         }
+        break;
+      }
+
+      case '/detach':
+      case '/disconnect': {
+        // 文字版的"⏏ 断开"按钮：仅 adopt 会话适用——botmux 只是观察用户原本在
+        // 跑的 CLI，断开只清掉 botmux 这一侧的 worker / polling，绝不结束 CLI
+        // 进程本身。等价于 card-handler 里 `actionType === 'disconnect'` 那段。
+        if (!ds) {
+          await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
+          break;
+        }
+        if (!ds.adoptedFrom) {
+          await sessionReply(rootId, t('cmd.detach.not_adopted', undefined, loc));
+          break;
+        }
+        const closedSessionId = ds.session.sessionId;
+        killWorker(ds);
+        sessionStore.closeSession(closedSessionId);
+        activeSessions.delete(sessionKey(rootId, larkAppId!));
+        await sessionReply(rootId, t('cmd.detach.success', undefined, loc));
+        logger.info(`[${logTag}] Detached (adopt) by ${cmd} command`);
         break;
       }
 
@@ -598,6 +735,7 @@ export async function handleCommand(
           const selfBot = getBot(ds!.larkAppId);
           const botCfg = selfBot.config;
           ds!.pendingRepo = false;
+          publishAttentionPatch(ds!);
           const pendingPrompt = ds!.pendingPrompt ?? '';
           // Was there an actual buffered user message to deliver? A session
           // launched *via* `/repo` (the command itself is the first message) has
@@ -747,7 +885,10 @@ export async function handleCommand(
         const currentCwd = getSessionWorkingDir(ds);
         const cardJson = buildRepoSelectCard(projects, currentCwd, rootId, loc);
         const repoCardMsgId = await sessionReply(rootId, cardJson, 'interactive');
-        if (ds) ds.repoCardMessageId = repoCardMsgId;
+        if (ds) {
+          ds.repoCardMessageId = repoCardMsgId;
+          announcePendingRepoSession(ds);
+        }
         logger.info(`[${logTag}] Sent repo card with ${projects.length} project(s)`);
         break;
       }
@@ -817,16 +958,17 @@ export async function handleCommand(
 
       case '/login': {
         const subCmd = message.content.replace(/^\/login\s*/, '').trim();
-        if (subCmd === 'status' || subCmd === '状态') {
-          await sessionReply(rootId, getTokenStatus());
-          break;
-        }
+        // 先定位本 bot 配置——token 状态与 OAuth URL 都按 per-bot appId/brand 走。
         const botCfg2 = ds ? getBot(ds.larkAppId).config : (larkAppId ? getBot(larkAppId).config : getAllBots()[0]?.config);
         if (!botCfg2?.larkAppId || !botCfg2?.larkAppSecret) {
           await sessionReply(rootId, t('cmd.login.no_credentials', undefined, loc));
           break;
         }
-        const { authUrl } = generateAuthUrl(botCfg2.larkAppId, botCfg2.larkAppSecret);
+        if (subCmd === 'status' || subCmd === '状态') {
+          await sessionReply(rootId, getTokenStatus(botCfg2.larkAppId, normalizeBrand(botCfg2.brand)));
+          break;
+        }
+        const { authUrl } = generateAuthUrl(botCfg2.larkAppId, botCfg2.larkAppSecret, normalizeBrand(botCfg2.brand));
         await sessionReply(rootId, [
           t('cmd.login.title', undefined, loc),
           '',
@@ -1117,7 +1259,7 @@ export async function handleCommand(
           });
           // Prefer the shareable join link (others can click to *join*); fall
           // back to the member-only applink URL when Lark's link API failed.
-          const applink = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+          const applink = chatAppLink(result.chatId, normalizeBrand(getBot(creatorAppId).config.brand));
           const link = result.shareLink ?? applink;
           // Partial failures are non-fatal — the chat exists; surface them as
           // hints so the user knows whether to expect to be auto-invited.
@@ -1422,7 +1564,7 @@ export async function handleCommand(
             transferOwnerTo: senderOpenId,
           });
           newChatId = result.chatId;
-          const applink = `https://applink.feishu.cn/client/chat/open?openChatId=${encodeURIComponent(result.chatId)}`;
+          const applink = chatAppLink(result.chatId, normalizeBrand(getBot(creatorAppId).config.brand));
           inviteLink = result.shareLink ?? applink;
         } catch (err: any) {
           logger.error(`[${logTag}] /relay --create: createGroup failed: ${err?.message ?? err}`);
@@ -1622,53 +1764,42 @@ export async function handleCommand(
       }
 
       case '/card': {
-        if (!ds) {
+        // Existing-session path. New topics route /card via handleCardCommand at
+        // the router (so no phantom session is created). off/on work without a
+        // live worker; show/bare summons a card.
+        const appId = ds?.larkAppId ?? larkAppId;
+        const cardChatId = ds?.chatId;
+        if (!appId || !cardChatId) {
           await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
           break;
         }
-        // Private mode (`privateCard`): send a one-shot snapshot only to the
-        // explicit talk-grant audience via the ephemeral API, instead of the
-        // group-visible live card. Ephemeral cards only work in plain `group`
-        // chats and can't be patched — so no live updates, and we fail closed
-        // (never fall back to a group-visible card) since not leaking is the
-        // entire point of this mode.
-        if (getBot(ds.larkAppId).config.privateCard) {
-          // Strict gate: only a *confirmed* plain group is safe — getChatModeStrict
-          // returns 'unknown' on API error instead of guessing 'group', so we fail
-          // closed (no leak) when we can't verify the chat type.
-          const mode = await getChatModeStrict(ds.larkAppId, ds.chatId);
-          if (mode !== 'group') {
-            await sessionReply(rootId, t('cmd.card.private_not_group', undefined, loc));
-            break;
-          }
-          const audience = resolvePrivateCardAudience(ds);
-          if (audience.length === 0) {
-            await sessionReply(rootId, t('cmd.card.private_no_audience', undefined, loc));
-            break;
-          }
-          const r = await postPrivateSnapshotCard(ds, audience);
-          if (r.notReady) {
-            await sessionReply(rootId, t('cmd.card.private_not_ready', undefined, loc));
-          } else if (r.sent === 0) {
-            // Total failure — surface a non-sensitive error (no terminal content,
-            // no open_id list). Most likely cause: missing send permission / bot
-            // not in chat / topic-thread chat.
-            await sessionReply(rootId, t('cmd.card.private_failed', undefined, loc));
-          } else if (r.sent < r.total) {
-            // Partial — report counts only, never the audience identities.
-            await sessionReply(rootId, t('cmd.card.private_partial', { sent: r.sent, total: r.total }, loc));
-          }
-          break;
-        }
-        // Manual summon. Force the live card on for the rest of this session —
-        // even when the bot has `disableStreamingCard` set — then post a fresh
-        // card. If the worker terminal isn't up yet, the force flag still sticks
-        // so the card appears (and live-updates) as soon as the worker is ready.
-        ds.streamingCardForced = true;
-        const posted = await postFreshStreamingCard(ds, deps.sessionReply);
-        if (!posted) {
-          await sessionReply(rootId, t('cmd.card.not_ready', undefined, loc));
-        }
+        await handleCardCommand(rootId, appId, cardChatId, message.senderId, message.content, deps);
+        break;
+      }
+
+      case '/list-slash-command':
+      case '/slash': {
+        // 列出本 bot 当前可用的 slash 命令，分三段：
+        //   ① botmux 固定放行的透传白名单（PASSTHROUGH_COMMANDS）
+        //   ② 用户在 bots.json 自定义配置的额外透传命令（customPassthroughCommands）
+        //   ③ 文件系统自动发现的 .claude 自定义命令 / skill / 插件（discoverSlashCommands）
+        // MCP 的 /mcp__<server>__<prompt> 需运行时握手才能枚举，这里仅按 .mcp.json 提示 server 名。
+        const botCfg = ds
+          ? getBot(ds.larkAppId).config
+          : (larkAppId ? getBot(larkAppId).config : getAllBots()[0]?.config);
+        const cliName = getCliDisplayName(botCfg?.cliId ?? 'claude-code');
+        const workingDir = getSessionWorkingDir(ds);
+        const builtin = [...PASSTHROUGH_COMMANDS];
+        const custom = botCfg?.customPassthroughCommands ?? [];
+        const discovered = discoverSlashCommands(workingDir);
+        const mcpServers = listMcpServerNames(workingDir);
+
+        const card = buildSlashListCard(
+          { cliName, builtin, custom, discovered, workingDir, mcpServers },
+          loc,
+        );
+        await sessionReply(rootId, card, 'interactive');
+        logger.info(`[${logTag}] /list-slash-command builtin=${builtin.length} custom=${custom.length} discovered=${discovered.length}`);
         break;
       }
 
@@ -1702,6 +1833,7 @@ export async function handleCommand(
           t('help.heading_adopt', undefined, loc),
           t('help.adopt', undefined, loc),
           t('help.adopt_pane', undefined, loc),
+          t('help.detach', undefined, loc),
           '',
           t('help.heading_login', undefined, loc),
           t('help.login', undefined, loc),
@@ -1719,6 +1851,7 @@ export async function handleCommand(
           t('help.heading_group', undefined, loc),
           t('help.group', undefined, loc),
           '',
+          t('help.list_slash', undefined, loc),
           t('help.help', undefined, loc),
         ];
         await sessionReply(rootId, help.join('\n'));
@@ -1821,7 +1954,7 @@ export async function startAdoptSession(
 
   const zellij = isZellijTarget(target);
   const valid = zellij
-    ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid)
+    ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid, target.cliId)
     : validateAdoptTarget(target);
   if (!valid) {
     await sessionReply(sessionAnchorId(ds), t('cmd.adopt.target_exited', undefined, loc));

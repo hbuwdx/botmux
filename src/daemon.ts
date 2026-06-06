@@ -13,7 +13,7 @@ import { chatHasAllowedUser, resolveGroupJoinPrompt } from './core/auto-start.js
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
-import { autoBindOncallFromDefault } from './services/oncall-store.js';
+import { ensureDefaultOncallBound } from './services/oncall-store.js';
 import * as scheduleStore from './services/schedule-store.js';
 import * as messageQueue from './services/message-queue.js';
 import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type MessageResource } from './im/lark/message-parser.js';
@@ -53,7 +53,7 @@ import {
 } from './core/worker-pool.js';
 import { ipcRoute, jsonRes, readJsonBody, setBotName, setLarkAppId, startIpcServer, setWorkflowRunner } from './core/dashboard-ipc-server.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
-import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, handleCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
+import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, resolvePassthroughCommands, handleCommand, handleCardCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
@@ -95,8 +95,9 @@ import { EventLog as WorkflowEventLog } from './workflows/events/append.js';
 import { replay as replayWorkflow } from './workflows/events/replay.js';
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
+import { normalizeBrand } from './im/lark/lark-hosts.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
-import { markSessionActivity } from './core/session-activity.js';
+import { markSessionActivity, announcePendingRepoSession } from './core/session-activity.js';
 import { WorkflowEventWatcher, handleWorkflowFanoutEvent } from './workflows/fanout.js';
 import type { WorkflowRuntimeContext, WorkerSpawnFn } from './workflows/runtime.js';
 import { runLoop } from './workflows/loop.js';
@@ -287,7 +288,11 @@ const pendingResponseQueue = createPendingResponseQueue();
 
 function streamingCardDisabledFor(ds: DaemonSession): boolean {
   if (ds.streamingCardForced) return false;
-  try { return getBot(ds.larkAppId).config.disableStreamingCard === true; } catch { return false; }
+  try {
+    const cfg = getBot(ds.larkAppId).config;
+    return cfg.disableStreamingCard === true
+      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId));
+  } catch { return false; }
 }
 
 function readSessionFreshFromDisk(sessionId: string, larkAppId: string): import('./types.js').Session | undefined {
@@ -425,7 +430,8 @@ export async function enforceMessageQuotaForCliInput(
 
   let quota;
   try {
-    quota = await consumeQuota(larkAppId, ev.quotaKey);
+    const def = getBot(larkAppId).config.messageQuota?.defaultLimit;
+    quota = await consumeQuota(larkAppId, ev.quotaKey, def);
   } catch (err) {
     logger.warn(`[quota:${larkAppId}] consume failed; dropping message ${messageId.substring(0, 12)}: ${err}`);
     abortCharge(larkAppId, messageId);
@@ -448,10 +454,10 @@ export async function enforceMessageQuotaForCliInput(
   }
   // 扣费成功才定论为 done。
   commitCharge(larkAppId, messageId);
-  if (quota.exhausted) {
-    await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
-    await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);
-  }
+  // exhausted=当前这条刚好用完额度（但依然放行给 AI 处理）。
+  // 不在此时发通知，避免给用户"本条已被拒绝"的错觉；
+  // 也不提前 revoke —— 把 quotaState 的 {limit, used>=limit} 记录保留下来，
+  // 等用户下一条消息进来被 allow=false 拦截时，再发"额度已用完"通知 + 执行 revoke。
   return true;
 }
 
@@ -559,6 +565,8 @@ const DAEMON_REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemon
 interface DaemonDescriptor {
   larkAppId: string;
   botName: string;
+  /** Lark app avatar URL (from /bot/v3/info); absent until the open_id probe lands. */
+  botAvatarUrl?: string;
   botIndex: number;
   ipcPort: number;
   pid: number;
@@ -595,7 +603,8 @@ function refreshCliVersion(cliId: CliId, cliPathOverride?: string): boolean {
 
   try {
     const adapter = createCliAdapterSync(cliId, cliPathOverride);
-    const raw = execFileSync(adapter.resolvedBin, ['--version'], {
+    const versionCommand = adapter.versionCommand?.() ?? { bin: adapter.resolvedBin, args: ['--version'] };
+    const raw = execFileSync(versionCommand.bin, versionCommand.args, {
       encoding: 'utf-8',
       timeout: 5_000,
     }).trim();
@@ -1372,6 +1381,10 @@ function getActiveCount(): number {
  * sees no visible response.
  */
 function beginNewTurn(ds: DaemonSession, title: string): void {
+  // `/card` summon is one-shot: it forces a live card only for the turn it ran
+  // in. A new turn returns to the config default (noCardChats / disableStreamingCard).
+  // Use `/card on` to persistently restore cards for the chat.
+  ds.streamingCardForced = undefined;
   const previousUsageLimit = ds.usageLimit;
   const previousStatus = ds.lastScreenStatus === 'limited' && previousUsageLimit ? 'limited' : 'idle';
   if (ds.streamCardId && ds.workerPort) {
@@ -1742,56 +1755,16 @@ function parseTriggerChatBinding(
  * unless it's already bound (`findOncallChatForAnyBot` upstream) or the user
  * has opted out via tombstone.
  *
- * Returns the binding entry on success, undefined when any precondition
- * fails or the lock-internal authoritative check (in `autoBindOncallFromDefault`)
- * sees a concurrent tombstone / existing binding.
+ * Thin wrapper around the shared `ensureDefaultOncallBound` in oncall-store,
+ * which dispatcher also calls before canTalk to avoid the oncall-first-message
+ * "无权限 → 弹授权卡" bug. Idempotent: repeated calls safe.
  */
 async function maybeAutoBindDefaultOncall(
   larkAppId: string,
   chatId: string,
   chatType: 'group' | 'p2p',
 ): Promise<OncallChat | undefined> {
-  if (chatType !== 'group') return undefined; // oncall is group-only by design
-  const bot = getBot(larkAppId);
-  const def = bot.config.defaultOncall;
-  if (!def?.enabled || !def.workingDir) return undefined;
-
-  // Fast-path tombstone check against the in-memory snapshot — avoids taking
-  // the lock when we already know we'd skip. The AUTHORITATIVE re-check lives
-  // inside autoBindOncallFromDefault under the file lock, so a race with a
-  // concurrent unbind (which writes the tombstone) is still safe.
-  const autobound = bot.config.defaultOncallAutoboundChats ?? [];
-  if (autobound.includes(chatId)) return undefined;
-
-  // Validate workingDir at fire time too — directory might have been
-  // deleted/moved since the dashboard save validated it. Skipping (vs.
-  // crashing) lets the user fix the path without losing other bot config.
-  const resolved = expandHome(def.workingDir);
-  let isDir = false;
-  try { isDir = statSync(resolved).isDirectory(); } catch { /* not a dir */ }
-  if (!isDir) {
-    logger.warn(
-      `[${larkAppId}] defaultOncall workingDir invalid (${resolved}); ` +
-      `skipping auto-bind for chat=${chatId}`,
-    );
-    return undefined;
-  }
-
-  const r = await autoBindOncallFromDefault(larkAppId, chatId, def.workingDir);
-  if (!r.ok) {
-    logger.warn(`[${larkAppId}] defaultOncall auto-bind failed: chat=${chatId} reason=${r.reason}`);
-    return undefined;
-  }
-  if (r.skipped) {
-    // Lock-internal authoritative check disagreed with our fast-path —
-    // tombstone or binding raced in. Fine, just don't surface a binding.
-    logger.info(`[${larkAppId}] defaultOncall auto-bind skipped chat=${chatId} reason=${r.skipped}`);
-    return undefined;
-  }
-  logger.info(
-    `[${larkAppId}] defaultOncall auto-bound chat=${chatId} → ${def.workingDir}`,
-  );
-  return r.entry;
+  return ensureDefaultOncallBound(larkAppId, chatId, chatType);
 }
 
 /**
@@ -1951,7 +1924,14 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       await sessionReply(anchor, restrictedText, 'text', larkAppId);
       return;
     }
-    if (PASSTHROUGH_COMMANDS.has(cmd)) {
+    // /card needs no fresh session: off/on only toggle per-chat config, and a
+    // summon has nothing to show in a brand-new topic. Route here so the generic
+    // daemon-command block below does not pre-create a worker=null session.
+    if (cmd === '/card') {
+      await handleCardCommand(anchor, larkAppId, chatId, senderOpenId, commandContent, commandDeps);
+      return;
+    }
+    if (resolvePassthroughCommands(larkAppId).has(cmd)) {
       await sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
       return;
     }
@@ -2147,6 +2127,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     const currentCwd = getSessionWorkingDir(ds);
     const cardJson = buildRepoSelectCard(projects, currentCwd, anchor, localeForBot(larkAppId));
     ds.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+    announcePendingRepoSession(ds);
     logger.info(`[${tag(ds)}] Waiting for repo selection (${projects.length} projects)`);
   } else {
     // No projects found — skip repo selection, spawn directly
@@ -2339,6 +2320,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       lastRepoScan.set(chatId, projects);
       const cardJson = buildRepoSelectCard(projects, getSessionWorkingDir(ds), anchor, localeForBot(larkAppId));
       ds.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+      announcePendingRepoSession(ds);
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 无默认目录，弹 repo 选择卡（${projects.length} 个项目）`);
     } else {
       ds.pendingRepo = false;
@@ -2508,7 +2490,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       await sessionReply(anchor, restrictedText, 'text', larkAppId);
       return;
     }
-    if (PASSTHROUGH_COMMANDS.has(cmd)) {
+    if (resolvePassthroughCommands(larkAppId).has(cmd)) {
       // 语义边界（刻意保留，非疏漏）：passthrough（/model /clear /compact 等）按
       // “发给 CLI 的对话输入”处理，因此不过下面 DAEMON_COMMANDS 的 oncall
       // canOperate 闸 —— oncall 放行的就是对话输入，canOperate 只管 botmux
@@ -2820,6 +2802,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       const currentCwd = getSessionWorkingDir(newDs);
       const cardJson = buildRepoSelectCard(projects, currentCwd, anchor, localeForBot(larkAppId));
       newDs.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+      announcePendingRepoSession(newDs);
       logger.info(`[${tag(newDs)}] Waiting for repo selection (${projects.length} projects)`);
     } else {
       // No projects found — skip repo selection, spawn directly
@@ -3084,10 +3067,22 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     probeBotOpenId(cfg.larkAppId).then(() => {
       writeBotInfoFile(config.session.dataDir);
       const probedName = bot.botName;
+      const probedAvatar = bot.botAvatarUrl;
+      let descChanged = false;
       if (probedName && probedName !== desc.botName) {
         desc.botName = probedName;
+        descChanged = true;
+      }
+      if (probedAvatar && probedAvatar !== desc.botAvatarUrl) {
+        desc.botAvatarUrl = probedAvatar;
+        descChanged = true;
+      }
+      if (descChanged) {
         try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
       }
+      // SessionRow.botName 同步换成友好名——否则 dashboard 会话行一直显示
+      // 启动时 seed 的 larkAppId（web 端有注册表映射兜底，这里是根因修复）。
+      if (probedName) setBotName(probedName);
     }).catch(err => {
       // Probe runs in background and is retried by the periodic heartbeat;
       // a single failure here is not actionable. Surface as debug only.
@@ -3132,7 +3127,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const evicted = activeSessions.delete(key);
         logger.info(`[chat-mode-converted] ${chatId.substring(0, 12)} evicted=${evicted}; worker (if any) keeps running until /close`);
       },
-    });
+    }, normalizeBrand(cfg.brand));
   }
 
   // Restore active sessions from previous run

@@ -8,7 +8,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getBot, getAllBots, findOncallChat, getOwnerOpenId, type BotState } from '../../bot-registry.js';
 import { config } from '../../config.js';
-import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId } from './client.js';
+import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
@@ -16,11 +16,13 @@ import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
 import { stripLeadingMentions } from './message-parser.js';
 import { recordObservedBots } from '../../services/observed-bots-store.js';
 import { BOTMUX_REQUIRED_SCOPES, buildScopeDeepLink } from '../../setup/verify-permissions.js';
+import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 import { tryHandleGrantCommand } from './grant-command.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
+import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -37,7 +39,7 @@ export function writeBotInfoFile(dataDir: string): void {
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
   // Read existing entries from other daemon processes
-  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
+  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; botAvatarUrl: string | null; cliId: string };
   let existing: BotInfoEntry[] = [];
   try {
     if (existsSync(filePath)) {
@@ -57,6 +59,7 @@ export function writeBotInfoFile(dataDir: string): void {
       larkAppId: b.config.larkAppId,
       botOpenId: b.botOpenId ?? null,
       botName: b.botName ?? null,
+      botAvatarUrl: b.botAvatarUrl ?? null,
       cliId: b.config.cliId,
     });
   }
@@ -93,8 +96,10 @@ export async function probeBotOpenId(larkAppId: string): Promise<void> {
   const bot = getBot(larkAppId);
   if (bot.botOpenId) return; // already known
 
+  const openApi = larkHosts(normalizeBrand(bot.config.brand)).openApi;
+
   // Call /bot/v3/info to get the bot's open_id using tenant_access_token
-  const tokenRes = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+  const tokenRes = await fetch(`${openApi}/open-apis/auth/v3/tenant_access_token/internal`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ app_id: bot.config.larkAppId, app_secret: bot.config.larkAppSecret }),
@@ -104,7 +109,7 @@ export async function probeBotOpenId(larkAppId: string): Promise<void> {
     throw new Error(`Failed to get tenant_access_token: ${tokenData.msg}`);
   }
 
-  const botRes = await fetch('https://open.feishu.cn/open-apis/bot/v3/info/', {
+  const botRes = await fetch(`${openApi}/open-apis/bot/v3/info/`, {
     headers: { Authorization: `Bearer ${tokenData.tenant_access_token}` },
   });
   const botData = await botRes.json() as any;
@@ -114,9 +119,11 @@ export async function probeBotOpenId(larkAppId: string): Promise<void> {
 
   const openId = botData.bot?.open_id;
   const appName = botData.bot?.app_name;
+  const avatarUrl = botData.bot?.avatar_url;
   if (openId) {
     bot.botOpenId = openId;
     if (appName) bot.botName = appName;
+    if (avatarUrl) bot.botAvatarUrl = avatarUrl;
     logger.info(`Bot open_id: ${bot.botOpenId}`);
   } else {
     throw new Error('No open_id in bot info response');
@@ -160,8 +167,10 @@ async function dmAdmin(larkAppId: string, adminOpenId: string, content: string, 
 
 export async function checkRequiredScopes(larkAppId: string): Promise<void> {
   const bot = getBot(larkAppId);
+  const brand = normalizeBrand(bot.config.brand);
+  const openApi = larkHosts(brand).openApi;
   try {
-    const tokenRes = await fetch('https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal', {
+    const tokenRes = await fetch(`${openApi}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ app_id: bot.config.larkAppId, app_secret: bot.config.larkAppSecret }),
@@ -172,7 +181,7 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       return;
     }
     const infoRes = await fetch(
-      `https://open.feishu.cn/open-apis/application/v6/applications/${bot.config.larkAppId}?lang=zh_cn`,
+      `${openApi}/open-apis/application/v6/applications/${bot.config.larkAppId}?lang=zh_cn`,
       { headers: { Authorization: `Bearer ${tokenData.tenant_access_token}` } },
     );
     const infoData = await infoRes.json() as any;
@@ -182,8 +191,8 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
     // scope 列表。这种"鸡生蛋"情况单独提示：让 admin 开通免审批的
     // self_manage 后下次重启就能自检了。
     if (infoData.code === 99991672) {
-      const selfManageAuthUrl = `https://open.feishu.cn/app/${bot.config.larkAppId}/auth?q=${encodeURIComponent(SELF_MANAGE_SCOPE)}&op_from=openapi&token_type=tenant`;
-      const targetAuthUrl = `https://open.feishu.cn/app/${bot.config.larkAppId}/auth?q=${encodeURIComponent(REQUIRED_BOT_AT_SCOPE)}&op_from=openapi&token_type=tenant`;
+      const selfManageAuthUrl = buildScopeDeepLink(bot.config.larkAppId, SELF_MANAGE_SCOPE, brand);
+      const targetAuthUrl = buildScopeDeepLink(bot.config.larkAppId, REQUIRED_BOT_AT_SCOPE, brand);
       logger.warn(
         `[${larkAppId}] scope 自检 API 被拒（99991672）：应用缺少 ${SELF_MANAGE_SCOPE}（免审批）。` +
         `开通后下次 daemon 重启即可自动核验跨 bot @ 必需权限 ${REQUIRED_BOT_AT_SCOPE}。申请链接：${selfManageAuthUrl}`,
@@ -247,10 +256,10 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       return;
     }
     const criticalLines = missingCritical.map((s, i) =>
-      `${i + 1}. **${s.desc}** (\`${s.name}\`)\n   ${buildScopeDeepLink(bot.config.larkAppId, s.name)}`,
+      `${i + 1}. **${s.desc}** (\`${s.name}\`)\n   ${buildScopeDeepLink(bot.config.larkAppId, s.name, brand)}`,
     ).join('\n\n');
     const optionalBlock = missingOptional.length > 0
-      ? `\n\n**可选权限（建议一并开通）**：\n${missingOptional.map(s => `- ${s.desc} (\`${s.name}\`): ${buildScopeDeepLink(bot.config.larkAppId, s.name)}`).join('\n')}`
+      ? `\n\n**可选权限（建议一并开通）**：\n${missingOptional.map(s => `- ${s.desc} (\`${s.name}\`): ${buildScopeDeepLink(bot.config.larkAppId, s.name, brand)}`).join('\n')}`
       : '';
     const dm =
       `⚠️ botmux 启动检查发现机器人 "${bot.botName ?? larkAppId}" 缺少 ${missingCritical.length} 项必需权限\n\n` +
@@ -271,6 +280,195 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
 
 export const CHAT_CACHE_TTL = 5 * 60_000; // 5 minutes
 const chatStatsCache = new Map<string, { userCount: number; botCount: number; fetchedAt: number }>();
+
+// ─── Event callback ACK safety ──────────────────────────────────────────────
+//
+// The Lark WS SDK sends exactly one response frame per event and only AFTER the
+// registered handler's promise resolves (WSClient.handleEventData: it awaits
+// eventDispatcher.invoke, then sendMessage once). So that frame is the ACK: a
+// slow handler delays it past Feishu's 3s budget and triggers a timeout re-push.
+// The message path below can spend seconds on OpenAPI lookups + spawning a CLI,
+// so we return synchronously and run the heavy work behind setImmediate — the
+// handler resolves immediately, the ACK is prompt, and the work runs after.
+//
+// Dedupe: Feishu re-pushes an un-ACKed/non-200 event at 15s, 5min, 1h, 6h (max
+// 4 retries), and its pipeline is at-least-once, so a duplicate can arrive even
+// after a timely 200. Fast-ACK keeps us inside 3s so timeout-retries stop
+// firing — the realistic duplicate is then a near-simultaneous at-least-once
+// copy, which a short-lived claim per stable event key suppresses. The TTL
+// covers the 15s/5min/1h retry tiers with margin; the 6h tier is only reachable
+// after a sustained ACK failure that fast-ACK prevents, so we don't size for it.
+// (We claim-then-ack-success on purpose: a redelivery is always treated as a
+//  duplicate, never as recovery — matching the prior swallow-and-ACK behavior.)
+const EVENT_CLAIM_TTL_MS = 2 * 60 * 60_000; // 2h — covers the 15s/5min/1h retry tiers
+const EVENT_CLAIM_PRUNE_INTERVAL_MS = 5 * 60_000;
+const EVENT_CLAIM_PRUNE_SIZE = 5000;
+const eventClaims = new Map<string, number>();
+let eventClaimsLastPrunedAt = 0;
+
+function pruneEventClaims(now = Date.now()): void {
+  eventClaimsLastPrunedAt = now;
+  for (const [key, expiresAt] of eventClaims) {
+    if (expiresAt <= now) eventClaims.delete(key);
+  }
+}
+
+function claimEventOnce(key: string): boolean {
+  const now = Date.now();
+  // Prune under size pressure OR on a time interval, so a busy bot's map stays
+  // bounded regardless of call cadence (the size gate alone never fires below
+  // the threshold, leaving expired entries pinned for the full TTL).
+  if (eventClaims.size > EVENT_CLAIM_PRUNE_SIZE || now - eventClaimsLastPrunedAt > EVENT_CLAIM_PRUNE_INTERVAL_MS) {
+    pruneEventClaims(now);
+  }
+  const expiresAt = eventClaims.get(key);
+  if (expiresAt && expiresAt > now) return false;
+  eventClaims.set(key, now + EVENT_CLAIM_TTL_MS);
+  return true;
+}
+
+function scheduleAckSafeEvent(key: string, work: () => Promise<void>, label: string): void {
+  if (!claimEventOnce(key)) {
+    logger.info(`[event-dedupe] duplicate ${label} ignored: ${key}`);
+    return;
+  }
+  // INVARIANT: claimEventOnce + this setImmediate scheduling must stay fully
+  // synchronous (no await before we get here). WS events arrive in order and
+  // setImmediate is FIFO, so same-anchor messages reach serializeByAnchor in
+  // arrival order ONLY while nothing awaits ahead of the schedule. An await here
+  // would reintroduce the kickoff-ordering bug serializeByAnchor guards against.
+  setImmediate(() => {
+    void work().catch(err => logger.error(`Error handling ${label}: ${err}`));
+  });
+}
+
+// Fallback for an event that carries no stable id at all. Dedupe must never
+// silently DROP a real message, so we hand back a unique key (process it, accept
+// a rare duplicate) rather than a content-prefix key that could collide with a
+// distinct message and suppress it for the whole TTL.
+let unkeyableEventSeq = 0;
+function unkeyableEventKey(): string {
+  return `__unkeyable__:${++unkeyableEventSeq}`;
+}
+
+function eventIdForKey(data: any): string | undefined {
+  return data?.event_id ?? data?.uuid ?? data?.header?.event_id ?? data?.event?.event_id;
+}
+
+// card.action.trigger is a synchronous callback with a 3s deadline and NO
+// re-push (unlike events). If a handler (e.g. restart, which spawns a worker)
+// might exceed the budget, we ACK before 3s with a toast and patch the card
+// afterwards — missing the deadline otherwise surfaces error 200341 to the user.
+// 2500ms leaves headroom for the WS frame round-trip inside the 3s window.
+const CARD_ACTION_ACK_TIMEOUT_MS = 2500;
+const CARD_ACTION_TIMEOUT = Symbol('card-action-timeout');
+const cardActionInFlight = new Set<string>();
+
+function cardActionMessageId(data: any): string | undefined {
+  return data?.context?.open_message_id ?? data?.open_message_id;
+}
+
+function cardActionKey(larkAppId: string, data: any): string {
+  const eventId = eventIdForKey(data);
+  if (eventId) return `card.action.trigger:${larkAppId}:${eventId}`;
+  const action = data?.action;
+  const value = action?.value ?? {};
+  return `card.action.trigger:${larkAppId}:${JSON.stringify({
+    messageId: cardActionMessageId(data),
+    operator: data?.operator?.open_id,
+    action: value?.action ?? action?.option ?? action?.tag,
+    rootId: value?.root_id,
+    sessionId: value?.session_id,
+    nonce: value?.card_nonce ?? value?.nonce,
+    option: action?.option,
+    key: value?.key,
+  })}`;
+}
+
+function shapeCardActionResult(result: any): any {
+  // The handler may return:
+  //   - an already-shaped Lark response ({toast} and/or {card}) -> pass through;
+  //   - a raw card body (e.g. toggle_stream) -> wrap as an in-place card patch.
+  if (result && (result.toast || result.card)) return result;
+  if (result) return { card: { type: 'raw', data: result } };
+  return undefined;
+}
+
+function serializeRawCardForPatch(cardData: any): string | undefined {
+  if (cardData === undefined || cardData === null) return undefined;
+  return typeof cardData === 'string' ? cardData : JSON.stringify(cardData);
+}
+
+async function patchTimedOutCardActionResult(larkAppId: string, data: any, shapedResult: any): Promise<void> {
+  const messageId = cardActionMessageId(data);
+  if (!messageId || !shapedResult?.card) return;
+  const card = shapedResult.card;
+  const raw = card.type === 'raw' ? card.data : card;
+  const body = serializeRawCardForPatch(raw);
+  if (!body) return;
+  await updateMessage(larkAppId, messageId, body);
+}
+
+async function handleCardActionAckSafe(data: any, larkAppId: string, handlers: EventHandlers): Promise<any> {
+  const eventId = eventIdForKey(data);
+  const key = cardActionKey(larkAppId, data);
+
+  // Durable dedupe ONLY when the platform gave a stable per-interaction id:
+  // suppresses a same-interaction redelivery over the long-connection so a
+  // non-idempotent action (restart/close) can't double-fire after the first
+  // copy already finished — the in-flight Set alone clears in finally() and
+  // would miss that. We deliberately do NOT durably claim the payload-based
+  // fallback key: distinct clicks of the same button (e.g. toggling stream
+  // on/off) legitimately repeat and must not be pinned for the whole TTL.
+  if (eventId && !claimEventOnce(key)) {
+    logger.info(`[event-dedupe] duplicate card action ignored (claimed): ${key}`);
+    return { toast: { type: 'info', content: '操作已收到，请勿重复点击' } };
+  }
+
+  if (cardActionInFlight.has(key)) {
+    logger.info(`[event-dedupe] duplicate card action ignored while in-flight: ${key}`);
+    return { toast: { type: 'info', content: '操作正在处理中，请稍候' } };
+  }
+
+  cardActionInFlight.add(key);
+  let timedOut = false;
+  const work = handlers.handleCardAction(data, larkAppId)
+    .then(shapeCardActionResult)
+    .catch(err => {
+      logger.error(`Error handling card action: ${err}`);
+      return undefined;
+    });
+
+  void work.then(result => {
+    if (!timedOut || !result) return;
+    if (!result.card && result.toast) {
+      // A toast-only result can't be re-surfaced after we already ACKed with the
+      // generic "后台处理中" toast: toasts ride the synchronous callback response,
+      // and the message-update API only patches the card. Log rather than drop.
+      logger.warn(`[card-action] slow handler resolved to a toast-only result after ACK; not shown to user: ${JSON.stringify(result.toast)}`);
+      return;
+    }
+    return patchTimedOutCardActionResult(larkAppId, data, result)
+      .catch(err => logger.warn(`Failed to patch timed-out card action result: ${err}`));
+  }).finally(() => {
+    cardActionInFlight.delete(key);
+  });
+
+  const timeout = new Promise(resolve => setTimeout(resolve, CARD_ACTION_ACK_TIMEOUT_MS, CARD_ACTION_TIMEOUT));
+  const result = await Promise.race([work, timeout]);
+  if (result === CARD_ACTION_TIMEOUT) {
+    timedOut = true;
+    logger.warn(`[card-action] handler exceeded ${CARD_ACTION_ACK_TIMEOUT_MS}ms; ACKing first and continuing in background: ${key}`);
+    return { toast: { type: 'info', content: '操作已收到，后台处理中' } };
+  }
+  return result;
+}
+
+/** Test-only: clear callback dedupe claims between cases. */
+export function __resetEventClaimsForTest(): void {
+  eventClaims.clear();
+  cardActionInFlight.clear();
+}
 
 export async function getGroupStats(larkAppId: string, chatId: string): Promise<{ userCount: number; botCount: number }> {
   const cacheKey = `${larkAppId}:${chatId}`;
@@ -579,7 +777,16 @@ export function evaluateTalk(larkAppId: string, chatId: string | undefined, send
   // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
   const allowedUsers = bot.resolvedAllowedUsers;
   if (senderOpenId && allowedUsers.includes(senderOpenId)) return { allowed: true, reason: 'allowedUser' };
-  if (chatId && findOncallChat(larkAppId, chatId)) return { allowed: true, reason: 'oncall' };
+  // Oncall 群命中：默认不限额；仅当 bot 配了 messageQuota.defaultLimit 时，
+  // 才挂 chat:<chatId>:<openId> 这一 quotaKey（与 chatGrant 同键、同计数器，
+  // 便于 owner 后续 /grant @x N 续杯/重置）。
+  if (chatId && findOncallChat(larkAppId, chatId)) {
+    const def = bot.config.messageQuota?.defaultLimit;
+    if (typeof def === 'number' && Number.isInteger(def) && def > 0 && senderOpenId) {
+      return { allowed: true, reason: 'oncall', quotaKey: chatQuotaKey(chatId, senderOpenId) };
+    }
+    return { allowed: true, reason: 'oncall' };
+  }
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
   if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
 
@@ -631,7 +838,7 @@ async function maybeSendGrantRequestCard(
   if (isThrottled(larkAppId, chatId, requesterOpenId)) return;
   const name = (message?.mentions ?? []).find((m: any) => m?.id?.open_id === requesterOpenId)?.name
     ?? requesterOpenId;
-  const nonce = openPending(larkAppId, chatId, requesterOpenId);
+  const nonce = openPending(larkAppId, chatId, requesterOpenId, getBot(larkAppId).config.messageQuota?.defaultLimit);
   const card = buildGrantCard(
     { ownerOpenId: owner, targets: [{ openId: requesterOpenId, name: String(name) }], chatId, nonce, mode: 'request' },
     localeForBot(larkAppId),
@@ -844,12 +1051,16 @@ export async function decideRouting(
  * Create and start the Lark WSClient with event dispatching.
  * Returns the WSClient instance for lifecycle management.
  */
-export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: string, handlers: EventHandlers): Lark.WSClient {
+export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: string, handlers: EventHandlers, brand: Brand = 'feishu'): Lark.WSClient {
   const eventDispatcher = new Lark.EventDispatcher({}).register({
     // 主动开工 — 场景①: the bot was added to a chat. Hand off to the daemon,
     // which gates on the autoStartOnGroupJoin toggle + allowedUser membership.
     // Requires this event to be subscribed for the app in the Feishu console.
-    'im.chat.member.bot.added_v1': async (data: any) => {
+    'im.chat.member.bot.added_v1': (data: any) => {
+      const chatIdForKey: string | undefined = data?.chat_id;
+      const operatorForKey: string | undefined = data?.operator_id?.open_id;
+      const eventKey = `im.chat.member.bot.added_v1:${larkAppId}:${eventIdForKey(data) ?? `${chatIdForKey ?? 'unknown'}:${operatorForKey ?? 'unknown'}`}`;
+      scheduleAckSafeEvent(eventKey, async () => {
       try {
         const chatId: string | undefined = data?.chat_id;
         const operatorOpenId: string | undefined = data?.operator_id?.open_id;
@@ -859,23 +1070,13 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       } catch (err) {
         logger.error(`Error handling bot-added event: ${err}`);
       }
+      }, 'bot-added event');
     },
-    'card.action.trigger': async (data: any) => {
-      try {
-        const result = await handlers.handleCardAction(data, larkAppId);
-        // The handler may return:
-        //   - an already-shaped Lark response ({toast} and/or {card}) → pass through
-        //     so toasts (e.g. "仅 owner 可操作") and explicit card payloads render;
-        //   - a raw card body (e.g. toggle_stream) → wrap as an in-place card patch
-        //     so Lark updates the clicked card without waiting for an API PATCH.
-        if (result && (result.toast || result.card)) return result;
-        if (result) return { card: { type: 'raw', data: result } };
-      } catch (err) {
-        logger.error(`Error handling card action: ${err}`);
-      }
-      return undefined;
-    },
-    'im.message.receive_v1': async (data: any) => {
+    'card.action.trigger': (data: any) => handleCardActionAckSafe(data, larkAppId, handlers),
+    'im.message.receive_v1': (data: any) => {
+      const messageIdForKey = data?.message?.message_id;
+      const eventKey = `im.message.receive_v1:${larkAppId}:${eventIdForKey(data) ?? messageIdForKey ?? unkeyableEventKey()}`;
+      scheduleAckSafeEvent(eventKey, async () => {
       try {
         const message = data.message;
         const sender = data.sender;
@@ -975,6 +1176,12 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const senderOpenId = sender?.sender_id?.open_id as string | undefined;
+        // defaultOncall 自动绑定必须在 canTalk 权限判断前完成，否则已开 defaultOncall
+        // 的群首次 @bot 时 oncallChats 中还没有该 chat → evaluateTalk 判无权限 → 误弹
+        // 自助授权申请卡。ensureDefaultOncallBound 本身带 fast-path 短路且 idempotent。
+        await ensureDefaultOncallBound(larkAppId, chatId, chatType).catch(err =>
+          logger.warn(`[oncall:${larkAppId}] pre-permission auto-bind failed for ${chatId.substring(0, 12)}: ${err}`),
+        );
         const isAllowed = canTalk(larkAppId, chatId, senderOpenId);
 
         // /introduce — collaboration handshake. Intercept before any routing
@@ -1141,6 +1348,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       } catch (err) {
         logger.error(`Error handling message event: ${err}`);
       }
+      }, 'message event');
     },
   });
 
@@ -1148,6 +1356,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
   const wsClient = new Lark.WSClient({
     appId: larkAppId,
     appSecret: larkAppSecret,
+    // brand → 长连接域名。国际版租户必须连 larksuite.com，否则收不到任何事件。
+    domain: sdkDomain(brand),
     // Default to warn — the SDK is chatty at info ("client ready", reconnect
     // heartbeats, etc.) and floods pm2 error.log when stderr is the only sink.
     // DEBUG=1 widens the level back to info for troubleshooting.

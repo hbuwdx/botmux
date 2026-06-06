@@ -9,7 +9,7 @@ import { expandHome } from './working-dir.js';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
-import { downloadMessageResource, listChatBotMembers } from '../im/lark/client.js';
+import { downloadMessageResource, listChatBotMembers, UserTokenMissingError } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
 import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
@@ -123,11 +123,15 @@ export async function downloadResources(larkAppId: string, messageId: string, re
       await downloadMessageResource(larkAppId, resMessageId, res.key, res.type, savePath);
       attachments.push({ type: res.type, path: savePath, name: res.name });
     } catch (err: any) {
-      // Download failure usually means missing User Token scope or a
-      // legitimately revoked attachment — the caller surfaces `needLogin`
-      // to the user. Per-failure log stays at info to aid retries.
+      // Per-failure log stays at info to aid retries.
       logger.info(`Failed to download ${res.type} ${res.key}: ${err.message}`);
-      if (err.message?.includes('User Token')) needLogin = true;
+      // Only prompt /login when the token is genuinely missing or rejected
+      // (UserTokenMissingError). A plain download failure — cross-tenant /
+      // card-image / withdrawn resource that 4xx/5xx's even WITH a valid token
+      // — must NOT be misreported as "missing User Token". (Previously this was
+      // a substring match on the error message, which caught downloadWithUserToken's
+      // own "User Token download failed" text and produced a false /login prompt.)
+      if (err instanceof UserTokenMissingError) needLogin = true;
     }
   }
 
@@ -614,7 +618,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     if (session.title?.startsWith('Adopt:') && session.adoptedFrom) {
       const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
       const validation = adopted.zellijPaneId
-        ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid) ? 'alive' : 'missing')
+        ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid, adopted.cliId) ? 'alive' : 'missing')
         : validateAdoptTargetState(adopted);
       if (validation === 'missing') {
         logger.info(`Closing adopt session ${session.sessionId} (adopted target exited: ${adoptTargetLabel(adopted)})`);

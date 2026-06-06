@@ -10,7 +10,9 @@ describe('dashboard sessions filters', () => {
     expect(html).toContain('value="codex"');
     expect(html).toContain('value="codex-app"');
     expect(html).toContain('value="mira"');
+    expect(html).toContain('value="pi"');
     expect(html).toMatch(/value="codex" checked/);
+    expect(html).toMatch(/value="pi" checked/);
     expect(html).not.toContain('<select');
   });
 });

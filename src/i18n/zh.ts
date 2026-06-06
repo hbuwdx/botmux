@@ -162,6 +162,11 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': '当前话题没有活跃的会话。',
+  'cmd.card.owner_only': '⚠️ 仅 bot 主人可以使用 /card。',
+  'cmd.card.off_ok': '🔕 已关闭本群流式卡片，状态改用「处理中卡片」原地更新（不撤回）。/card on 恢复出卡；/card 可临时召唤一张实时卡。',
+  'cmd.card.on_ok': '🔔 已恢复本群流式卡片。下条状态起重新出实时卡。',
+  'cmd.card.fail': '⚠️ 操作失败：{reason}',
+  'cmd.card.usage': '用法：/card（召唤实时卡）| /card off（本群关流式卡）| /card on（恢复出卡）',
   'cmd.card.not_ready': '终端尚未就绪，等会话起好后流式卡片会自动出现。',
   'cmd.card.private_not_ready': '🔒 终端尚未就绪，等会话起好后再发一次 /card。',
   'cmd.card.private_not_group': '🔒 私密卡片仅支持普通群聊，话题群 / 单聊无法发送（飞书限制）。',
@@ -200,6 +205,8 @@ export const messages: Record<string, string> = {
   'cmd.adopt.pane_not_found': '未找到 tmux pane {pane}',
   'cmd.adopt.target_exited': '⚠️ 目标 CLI 会话已退出',
   'cmd.adopt.success': '📡 已接入 {cliName} · {project} ({pane})',
+  'cmd.detach.success': '⏏ 已断开，原 CLI 会话不受影响',
+  'cmd.detach.not_adopted': '本话题不是 /adopt 接入的会话，/detach 不适用。要结束 botmux 会话用 /close（会一并结束 CLI 进程）。',
   'cmd.codex_app_adopt.no_threads': '未发现可继续的 Codex App 对话',
   'cmd.codex_app_adopt.thread_not_found': '未找到 Codex App 对话 {threadId}',
   'cmd.codex_app_adopt.list_failed': '读取 Codex App 对话失败：{error}',
@@ -292,6 +299,7 @@ export const messages: Record<string, string> = {
   'help.heading_adopt': '📡 会话接入：',
   'help.adopt': '/adopt              - 接入本机正在运行的 CLI 会话',
   'help.adopt_pane': '/adopt <tmux_pane>  - 直接接入指定 tmux pane',
+  'help.detach': '/detach             - 断开本话题与 adopt 会话的桥接（原 CLI 不受影响，/disconnect 同义）',
   'help.heading_login': '🔐 用户授权：',
   'help.login': '/login              - 飞书用户授权（可下载第三方卡片图片等）',
   'help.login_status': '/login status       - 查看授权状态',
@@ -304,7 +312,20 @@ export const messages: Record<string, string> = {
   'help.revoke': '@机器人 /revoke @某人  - 撤销对方本群对话权（可一次 @ 多人/多 bot）；/revoke（不带人）撤销整群授权',
   'help.heading_group': '🆕 一键新建会话群：',
   'help.group': '/group <群名>  (别名 /g)  - 自动建群、邀请你进群（整群=一个 CLI 会话）',
+  'help.list_slash': '/list-slash-command  (别名 /slash)  - 列出当前可用的 slash 命令（固定放行 / 自定义配置 / 自动发现三段）',
   'help.help': '/help       - 显示此帮助',
+
+  // ─── /list-slash-command ─────────────────────────────────────────────────
+  'slashlist.heading': '🧩 当前可用的 Slash 命令（{cliName}）',
+  'slashlist.part_builtin': '① botmux 固定放行（内置透传白名单）：',
+  'slashlist.part_custom': '② 用户自定义配置（bots.json · customPassthroughCommands）：',
+  'slashlist.part_custom_empty': '（未配置 —— 在 bots.json 给本 bot 加 customPassthroughCommands: ["/xxx"] 即可额外放行）',
+  'slashlist.part_discovered': '③ 自动发现（{cliName} 的 .claude 自定义命令 / skill / 插件）：',
+  'slashlist.part_discovered_empty': '（未发现 —— {dir} 及 ~/.claude 下暂无 commands/skills/plugins）',
+  'slashlist.more': '… 另有 {n} 条未展示',
+  'slashlist.mcp_note': 'ℹ️ MCP 的 /mcp__<server>__<prompt> 需运行时握手才能枚举，此处不列。检测到 MCP server：{servers}',
+  'slashlist.col_cmd': '命令',
+  'slashlist.col_desc': '说明',
 
   // ─── AI system prompt (Claude Code: --append-system-prompt) ──────────────
   'ai.routing.intro': '你连接到了飞书（Lark）话题群。用户在飞书上阅读，看不到你的终端输出。',

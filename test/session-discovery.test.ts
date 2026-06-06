@@ -32,6 +32,7 @@ vi.mock('node:os', () => ({
 import { execSync } from 'node:child_process';
 import { readFileSync, readlinkSync, existsSync, readdirSync } from 'node:fs';
 import { discoverAdoptableSessions, validateAdoptTarget } from '../src/core/session-discovery.js';
+import type { CliId } from '../src/adapters/cli/types.js';
 
 const mockExecSync = vi.mocked(execSync);
 const mockReadFileSync = vi.mocked(readFileSync);
@@ -48,6 +49,7 @@ const mockReaddirSync = vi.mocked(readdirSync);
  * commMap: pid → comm name
  * cwdMap: pid → cwd path
  * childMap: pid → child pids
+ * cmdlineMap: pid → argv list for /proc/<pid>/cmdline
  * dimsMap: tmuxTarget → "cols rows"
  * claudeMeta: pid → JSON string of session metadata
  */
@@ -56,14 +58,22 @@ function setupMocks(opts: {
   commMap?: Record<number, string>;
   cwdMap?: Record<number, string>;
   childMap?: Record<number, number[]>;
+  cmdlineMap?: Record<number, string[]>;
   dimsMap?: Record<string, string>;
   claudeMeta?: Record<number, string>;
+  /** pid → starttime (clock ticks since boot) for /proc/<pid>/stat field 22.
+   *  Drives readProcessStartTime's Linux fast path. Pids absent here yield a
+   *  thrown ENOENT → readProcessStartTime returns undefined (no ps fallback in
+   *  the mocked child_process), matching the "uptime unknown" legacy behavior. */
+  statMap?: Record<number, number>;
+  /** /proc/stat btime (seconds since epoch). Defaults to 1_700_000_000. */
+  bootTimeSeconds?: number;
   /** pid → ordered list of /proc/<pid>/fd/<n> symlink target strings.
    *  Used to test CoCo session discovery (and any future fd-walking logic).
    *  Pass `'<path> (deleted)'` suffix to simulate procfs's deleted-inode marker. */
   procFdMap?: Record<number, string[]>;
 }) {
-  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, dimsMap = {}, claudeMeta = {}, procFdMap = {} } = opts;
+  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, cmdlineMap = {}, dimsMap = {}, claudeMeta = {}, statMap = {}, bootTimeSeconds = 1_700_000_000, procFdMap = {} } = opts;
 
   // Replace blanket existsSync / readdirSync mocks with procFdMap-aware ones.
   mockExistsSync.mockImplementation((path: unknown) => {
@@ -135,6 +145,33 @@ function setupMocks(opts: {
     if (commMatch) {
       const pid = Number(commMatch[1]);
       if (pid in commMap) return commMap[pid] + '\n';
+      throw new Error('ENOENT');
+    }
+
+    // /proc/<pid>/cmdline
+    const cmdlineMatch = pathStr.match(/\/proc\/(\d+)\/cmdline/);
+    if (cmdlineMatch) {
+      const pid = Number(cmdlineMatch[1]);
+      if (pid in cmdlineMap) return cmdlineMap[pid]!.join('\0') + '\0';
+      throw new Error('ENOENT');
+    }
+
+    // /proc/stat (system boot time)
+    if (pathStr === '/proc/stat') {
+      return `cpu 0 0 0 0\nbtime ${bootTimeSeconds}\nprocesses 1\n`;
+    }
+
+    // /proc/<pid>/stat — only field 22 (starttime, index 19 after the comm
+    // paren) matters to readProcessStartTime; pad the leading fields with 0s.
+    const statMatch = pathStr.match(/\/proc\/(\d+)\/stat$/);
+    if (statMatch) {
+      const pid = Number(statMatch[1]);
+      if (pid in statMap) {
+        const after = Array(19).fill('0');
+        after[0] = 'S';
+        after.push(String(statMap[pid]));
+        return `${pid} (proc) ${after.join(' ')}`;
+      }
       throw new Error('ENOENT');
     }
 
@@ -224,6 +261,61 @@ describe('discoverAdoptableSessions', () => {
     expect(results[1]!.cliId).toBe('aiden');
     expect(results[1]!.paneCols).toBe(200);
     expect(results[1]!.paneRows).toBe(50);
+  });
+
+  it('should discover cursor-agent processes as Cursor sessions', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      commMap: { 1000: 'zsh', 1001: 'cursor-agent' },
+      childMap: { 1000: [1001] },
+      cwdMap: { 1001: '/workspace/cursor' },
+      dimsMap: { 'cursor:0.0': '160 50' },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('cursor');
+    expect(results[0]!.cliPid).toBe(1001);
+    expect(results[0]!.cwd).toBe('/workspace/cursor');
+  });
+
+  it('should derive startedAt from process start time for non-Claude CLIs', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      commMap: { 1000: 'zsh', 1001: 'cursor-agent' },
+      childMap: { 1000: [1001] },
+      cwdMap: { 1001: '/workspace/cursor' },
+      dimsMap: { 'cursor:0.0': '160 50' },
+      // btime 1_700_000_000s + 50000 ticks / 100 Hz = 1_700_000_500s
+      statMap: { 1001: 50_000 },
+      bootTimeSeconds: 1_700_000_000,
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('cursor');
+    expect(results[0]!.startedAt).toBe(1_700_000_500_000);
+  });
+
+  it('should treat generic agent as Cursor only for Cursor-filtered adoption', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      commMap: { 1000: 'zsh', 1001: 'MainThread' },
+      childMap: { 1000: [1001] },
+      cmdlineMap: { 1001: ['/home/user/.local/bin/agent', '--model', 'gpt-5.5-extra-high'] },
+      cwdMap: { 1001: '/workspace/cursor' },
+      dimsMap: { 'cursor:0.0': '160 50' },
+    });
+
+    expect(discoverAdoptableSessions()).toHaveLength(0);
+
+    const results = discoverAdoptableSessions('cursor');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('cursor');
+    expect(results[0]!.cliPid).toBe(1001);
+    expect(results[0]!.cwd).toBe('/workspace/cursor');
   });
 
   it('should skip bmx-* prefixed sessions', () => {
@@ -407,6 +499,21 @@ describe('discoverAdoptableSessions', () => {
     expect(results[0]!.cwd).toBe('/workspace/hermes');
   });
 
+  it('should detect Pi CLI process', () => {
+    setupMocks({
+      paneLines: 'pisession:0.0 1000\n',
+      commMap: { 1000: 'pi' },
+      cwdMap: { 1000: '/workspace/pi' },
+      dimsMap: { 'pisession:0.0': '120 40' },
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('pi');
+    expect(results[0]!.cwd).toBe('/workspace/pi');
+  });
+
   it('should not include sessionId for non-claude CLI types', () => {
     setupMocks({
       paneLines: 'mysession:0.0 1000\n',
@@ -556,11 +663,11 @@ describe('validateAdoptTarget', () => {
   // validateAdoptTarget to take the full AdoptableSession-shaped object so it
   // can route to either tmux or herdr validators. These helpers preserve the
   // original tests' intent while feeding the new shape.
-  const tmuxTarget = (target: string, cliPid: number) => ({
+  const tmuxTarget = (target: string, cliPid: number, cliId: CliId = 'claude-code') => ({
     source: 'tmux' as const,
     tmuxTarget: target,
     cliPid,
-    cliId: 'claude-code' as const,
+    cliId,
     cwd: '/x',
     paneCols: 200,
     paneRows: 50,
@@ -625,7 +732,31 @@ describe('validateAdoptTarget', () => {
       dimsMap: {},
     });
 
-    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1002));
+    const result = validateAdoptTarget(tmuxTarget('mysession:0.0', 1002, 'aiden'));
     expect(result).toBe(true);
+  });
+
+  // Regression: a Cursor agent installed under the generic name `agent` is only
+  // recognized when the identifier is filtered to 'cursor'. Discovery passes
+  // that filter, so the session surfaces; validation must pass it too, or the
+  // pre-adopt guard (and every daemon-restart restore) re-identifies nothing and
+  // wrongly reports the live session as exited. See cliIdForComm's `agent` case.
+  it('should validate a generic-agent Cursor target by threading its cliId filter', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      // comm is the launcher's thread name; the real identity is argv[0]=`agent`.
+      commMap: { 1000: 'zsh', 1001: 'MainThread' },
+      childMap: { 1000: [1001] },
+      cmdlineMap: { 1001: ['/home/user/.local/bin/agent', '--model', 'gpt-5.5'] },
+      cwdMap: {},
+      dimsMap: {},
+    });
+
+    // Filtered to 'cursor' (as discovery was) → the agent is re-identified → alive.
+    expect(validateAdoptTarget(tmuxTarget('cursor:0.0', 1001, 'cursor'))).toBe(true);
+    // Without the Cursor filter the generic `agent` is unrecognized — proving the
+    // guard genuinely consults the filter, and that omitting it (the old bug)
+    // would have falsely reported "exited".
+    expect(validateAdoptTarget(tmuxTarget('cursor:0.0', 1001, 'claude-code'))).toBe(false);
   });
 });

@@ -195,6 +195,9 @@ export interface CliAdapter {
    *  Keys placed here are also forwarded through the tmux backend (see
    *  BOTMUX_INJECTED_ENV_KEYS). undefined → inherit the worker env unchanged. */
   readonly spawnEnv?: Readonly<Record<string, string>>;
+
+  /** Optional CLI version command override. Defaults to `[resolvedBin, '--version']`. */
+  versionCommand?(): { bin: string; args: string[] };
 }
 
-export type CliId = 'claude-code' | 'seed' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira';
+export type CliId = 'claude-code' | 'seed' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'opencode' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'traex' | 'pi' | 'copilot';

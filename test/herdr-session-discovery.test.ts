@@ -145,6 +145,24 @@ describe('discoverAdoptableSessions (herdr branch)', () => {
     expect(onlyCodex[0]!.cliId).toBe('codex');
   });
 
+  it('treats generic agent as Cursor only when Cursor is requested', () => {
+    installHerdrFixture({
+      sessions: [{ name: 'work', running: true }],
+      agentsBySession: {
+        work: [
+          { agent: 'agent', pane_id: '1-1', cwd: '/cursor' },
+        ],
+      },
+    });
+
+    expect(discoverAdoptableSessions()).toHaveLength(0);
+
+    const onlyCursor = discoverAdoptableSessions('cursor');
+    expect(onlyCursor).toHaveLength(1);
+    expect(onlyCursor[0]!.cliId).toBe('cursor');
+    expect(onlyCursor[0]!.cwd).toBe('/cursor');
+  });
+
   it('returns an empty list when herdr is unavailable', () => {
     mockedExecFileSync.mockImplementation(() => { throw new Error('ENOENT'); });
     expect(discoverAdoptableSessions()).toEqual([]);

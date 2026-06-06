@@ -13,11 +13,11 @@
  * project dir). If a pane matches zero or >1 process, we REFUSE it (skip) —
  * better no-adopt than adopting the wrong pane (Codex's guidance).
  */
-import { realpathSync, readFileSync } from 'node:fs';
-import { basename } from 'node:path';
+import { realpathSync } from 'node:fs';
 import type { CliId } from '../adapters/cli/types.js';
 import {
-  cliIdForComm, readComm, readCwd, getChildPids, readClaudeSessionMeta,
+  readComm, readCwd, getChildPids, readClaudeSessionMeta, cliIdFromCommArgv, readCmdline,
+  readProcessStartTime,
 } from './session-discovery.js';
 import { findCodexRolloutByPid } from '../services/codex-transcript.js';
 import { findCocoSessionByPid } from '../services/coco-transcript.js';
@@ -28,6 +28,8 @@ import {
 import { zellijEnv } from '../setup/ensure-zellij.js';
 import { logger } from '../utils/logger.js';
 import { execFileSync } from 'node:child_process';
+
+export { cliIdFromCommArgv } from './session-discovery.js';
 
 export interface ZellijAdoptableSession {
   zellijSession: string;   // e.g. "mywork"
@@ -47,46 +49,6 @@ function canonPath(p: string | undefined): string | undefined {
   let out = p;
   try { out = realpathSync(p); } catch { /* keep raw */ }
   return out.length > 1 && out.endsWith('/') ? out.slice(0, -1) : out;
-}
-
-/** Interpreters that launch a CLI as a script argument (fnm/npx shims, etc.),
- *  so the CLI identity lives in argv, not in comm. */
-const INTERPRETERS = new Set(['node', 'nodejs', 'bun', 'deno', 'python', 'python2', 'python3', 'ruby', 'npx', 'tsx']);
-
-/** /proc/<pid>/cmdline → argv (Linux fast path; ps fallback for macOS). */
-function readCmdline(pid: number): string[] {
-  try {
-    return readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean);
-  } catch {
-    try {
-      const out = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
-      return out.trim().split(/\s+/).filter(Boolean);
-    } catch { return []; }
-  }
-}
-
-/**
- * Resolve a CliId from a process's comm + argv (pure — unit testable). Checks
- * comm first (renamed binary, e.g. `codex`/`claude`); if comm is a bare
- * interpreter (e.g. an fnm shim launches `node …/bin/codex`, so /proc/comm is
- * "node"), scan argv for the CLI script basename. Without this, node-wrapped
- * CLIs are invisible to discovery.
- */
-export function cliIdFromCommArgv(comm: string | undefined, argv: string[], filterCliId?: CliId): CliId | undefined {
-  if (!comm) return undefined;
-  // cliIdForComm only special-cases mtr/opencode for filterCliId; it does NOT
-  // otherwise filter — so apply the filter explicitly at the end.
-  let detected = cliIdForComm(comm, filterCliId);
-  if (!detected && INTERPRETERS.has(comm)) {
-    for (const arg of argv.slice(1)) {
-      if (arg.startsWith('-')) continue; // skip flags
-      const id = cliIdForComm(basename(arg), filterCliId);
-      if (id) { detected = id; break; }
-    }
-  }
-  if (!detected) return undefined;
-  if (filterCliId && detected !== filterCliId) return undefined;
-  return detected;
 }
 
 function cliIdForProc(pid: number, filterCliId?: CliId): CliId | undefined {
@@ -263,7 +225,9 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
         cliId: cli.cliId,
         sessionId,
         cwd: cli.cwd ?? '',
-        startedAt,
+        // Same uptime fallback as the tmux path: only Claude carries startedAt
+        // from its session JSON, so derive it from the process for everyone else.
+        startedAt: startedAt ?? readProcessStartTime(cli.pid),
         paneCols: dims.cols,
         paneRows: dims.rows,
       });
@@ -273,11 +237,14 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
   return results;
 }
 
-/** Re-confirm a zellij pane still runs the expected CLI pid (pre-adopt guard). */
-export function validateZellijAdoptTarget(session: string, paneId: string, expectedPid: number): boolean {
+/** Re-confirm a zellij pane still runs the expected CLI pid (pre-adopt guard).
+ *  `filterCliId` MUST mirror discovery's filter: a generic-named `agent` (Cursor)
+ *  is only recognized as a CLI under the 'cursor' filter, so without it the
+ *  expected pid is never re-identified and a live session looks exited. */
+export function validateZellijAdoptTarget(session: string, paneId: string, expectedPid: number, filterCliId?: CliId): boolean {
   const serverPid = findServerPid(session);
   if (!serverPid) return false;
-  const clis = findAllClisUnder(serverPid, 4);
+  const clis = findAllClisUnder(serverPid, 4, filterCliId);
   if (!clis.some(c => c.pid === expectedPid)) return false;
   // And the pane must still exist.
   return paneDimensions(session, paneId) !== undefined;

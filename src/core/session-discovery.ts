@@ -2,7 +2,7 @@
  * Session Discovery — scans tmux panes for running CLI processes that can be adopted.
  *
  * Discovers non-botmux tmux sessions running known CLI binaries (Claude Code,
- * Codex, Aiden, CoCo, Gemini, OpenCode, MTR, Hermes) and collects metadata needed to adopt them.
+ * Codex, Aiden, CoCo, Cursor, Gemini, OpenCode, MTR, Hermes, Pi) and collects metadata needed to adopt them.
  */
 import { execFileSync, execSync } from 'node:child_process';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
@@ -43,6 +43,7 @@ const CLI_COMM_MAP: Record<string, CliId> = {
   codex: 'codex',
   aiden: 'aiden',
   coco: 'coco',
+  'cursor-agent': 'cursor',
   // CoCo 的别名 traecli：某些发行版（如 trae）安装的可执行实际叫
   // `traecli`，tmux pane_current_command 仍显示 "coco" 是因为进程标题被
   // 改写过；macOS 下 `ps -o comm=` 拿到的是真实 argv[0]，因此这里需要
@@ -52,16 +53,60 @@ const CLI_COMM_MAP: Record<string, CliId> = {
   opencode: 'opencode',
   mtr: 'mtr',
   hermes: 'hermes',
+  pi: 'pi',
 };
+
+/** Interpreters and native launchers that may hide the CLI identity in argv.
+ *  Cursor Agent is one example on Linux: /proc/<pid>/comm can be `MainThread`
+ *  while argv[0] is `/.../cursor-agent` or `/.../agent`. */
+const COMM_ARGV_LAUNCHERS = new Set([
+  'node', 'nodejs', 'bun', 'deno', 'python', 'python2', 'python3', 'ruby', 'npx', 'tsx',
+  'MainThread',
+]);
 
 export function cliIdForComm(comm: string, filterCliId?: CliId): CliId | undefined {
   const normalizedComm = comm.startsWith('.') ? comm.slice(1) : comm;
   const direct = CLI_COMM_MAP[comm] ?? CLI_COMM_MAP[normalizedComm];
+  // Cursor's agent binary may be installed as the generic name `agent`. Only
+  // accept that alias when a Cursor bot is explicitly asking, otherwise a broad
+  // /adopt scan could mistake unrelated agent processes for Cursor sessions.
+  if (filterCliId === 'cursor' && normalizedComm === 'agent') return 'cursor';
   // MTR is an OpenCode fork and some installs still expose the underlying
   // native process as "opencode". When an MTR bot asks to adopt, treat that
   // process as MTR so the bot's filter does not hide its own sessions.
   if (filterCliId === 'mtr' && direct === 'opencode') return 'mtr';
   return direct;
+}
+
+/** /proc/<pid>/cmdline → argv (Linux fast path; ps fallback for macOS). */
+export function readCmdline(pid: number): string[] {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean);
+  } catch {
+    try {
+      const out = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+      return out.trim().split(/\s+/).filter(Boolean);
+    } catch { return []; }
+  }
+}
+
+/**
+ * Resolve a CliId from a process's comm + argv. Checks comm first; if the comm
+ * belongs to a generic launcher, scan argv for the CLI executable basename.
+ */
+export function cliIdFromCommArgv(comm: string | undefined, argv: string[], filterCliId?: CliId): CliId | undefined {
+  if (!comm) return undefined;
+  let detected = cliIdForComm(comm, filterCliId);
+  if (!detected && COMM_ARGV_LAUNCHERS.has(comm)) {
+    for (const arg of argv) {
+      if (arg.startsWith('-')) continue;
+      const id = cliIdForComm(basename(arg), filterCliId);
+      if (id) { detected = id; break; }
+    }
+  }
+  if (!detected) return undefined;
+  if (filterCliId && detected !== filterCliId) return undefined;
+  return detected;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -134,6 +179,77 @@ export function readCwd(pid: number): string | undefined {
   }
 }
 
+// /proc/stat btime 与 CLK_TCK 在一次 daemon 生命周期内不变，缓存避免每个候选都
+// 重复 fork-exec / 读盘。
+let cachedBtimeSeconds: number | undefined;
+let cachedBtimeRead = false;
+function readBootTimeSeconds(): number | undefined {
+  if (cachedBtimeRead) return cachedBtimeSeconds;
+  cachedBtimeRead = true;
+  try {
+    const m = readFileSync('/proc/stat', 'utf-8').match(/^btime\s+(\d+)/m);
+    cachedBtimeSeconds = m ? Number(m[1]) : undefined;
+  } catch {
+    cachedBtimeSeconds = undefined;
+  }
+  return cachedBtimeSeconds;
+}
+
+let cachedClkTck: number | undefined;
+function clockTicksPerSecond(): number {
+  if (cachedClkTck !== undefined) return cachedClkTck;
+  try {
+    const n = Number(execFileSync('getconf', ['CLK_TCK'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim());
+    cachedClkTck = Number.isFinite(n) && n > 0 ? n : 100;
+  } catch {
+    // 100 是 Linux 上几乎通用的默认值，拿不到 getconf 时用它兜底。
+    cachedClkTck = 100;
+  }
+  return cachedClkTck;
+}
+
+/**
+ * 进程启动时间（epoch ms），best-effort。让 /adopt 选择卡片能为**任意** CLI 显示
+ * 真实运行时长，而不是只有 Claude（Claude 另有 ~/.claude/sessions/<pid>.json 带
+ * startedAt）。其它 CLI（cursor/codex/coco/gemini…）之前一律落 "未知" 就是因为
+ * 这里没有兜底。
+ *
+ * Linux 走 /proc/<pid>/stat（字段 22 = starttime，单位时钟滴答，自开机起算）+
+ * /proc/stat 的 btime；其它 Unix 走 `ps -o lstart=` 解析。读不到返回 undefined。
+ */
+export function readProcessStartTime(pid: number): number | undefined {
+  if (IS_LINUX) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // comm（字段 2）用括号包裹且可能含空格/括号，slice 到最后一个 ')' 之后，
+      // 让后续字段偏移稳定。')' 之后第一个字段是 state（字段 3），所以 starttime
+      // （字段 22）对应这里的下标 19。
+      const afterComm = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+      const starttimeTicks = Number(afterComm[19]);
+      const btime = readBootTimeSeconds();
+      if (Number.isFinite(starttimeTicks) && btime !== undefined) {
+        return Math.round((btime + starttimeTicks / clockTicksPerSecond()) * 1000);
+      }
+    } catch {
+      // 落到下面的 ps 兜底
+    }
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (out) {
+      const ms = Date.parse(out);
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    // 进程不存在 / ps 不可用
+  }
+  return undefined;
+}
+
 /**
  * 获取一个进程的直接子进程 PID。
  *
@@ -187,7 +303,7 @@ function findCliProcess(
     for (const pid of current) {
       const comm = readComm(pid);
       if (comm) {
-        const cliId = cliIdForComm(comm, filterCliId);
+        const cliId = cliIdFromCommArgv(comm, readCmdline(pid), filterCliId);
         if (cliId) return { pid, cliId };
       }
       next.push(...getChildPids(pid));
@@ -305,9 +421,9 @@ function extractHerdrAgents(raw: any): any[] {
   return Array.isArray(agents) ? agents : [];
 }
 
-function herdrAgentCliId(agent: any): CliId | undefined {
+function herdrAgentCliId(agent: any, filterCliId?: CliId): CliId | undefined {
   const name = typeof agent?.agent === 'string' ? basename(agent.agent) : '';
-  return name in CLI_COMM_MAP ? CLI_COMM_MAP[name]! : undefined;
+  return name ? cliIdForComm(name, filterCliId) : undefined;
 }
 
 function discoverHerdrAdoptableSessions(filterCliId?: CliId): AdoptableSession[] {
@@ -321,7 +437,7 @@ function discoverHerdrAdoptableSessions(filterCliId?: CliId): AdoptableSession[]
     const sessionName = session.name as string;
     const rawAgents = herdrJson(['--session', sessionName, 'agent', 'list']);
     for (const agent of extractHerdrAgents(rawAgents)) {
-      const cliId = herdrAgentCliId(agent);
+      const cliId = herdrAgentCliId(agent, filterCliId);
       if (!cliId) continue;
       if (filterCliId && cliId !== filterCliId) continue;
       const cwd = typeof agent?.cwd === 'string' ? agent.cwd : undefined;
@@ -445,6 +561,13 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
         if (cocoSession) sessionId = cocoSession.sessionId;
       }
 
+      // 5b. Fall back to the CLI process's own start time for uptime. Without
+      // this only Claude (which has a session JSON with startedAt) shows a real
+      // uptime; every other CLI — cursor/codex/coco/gemini… — rendered "未知".
+      if (startedAt === undefined) {
+        startedAt = readProcessStartTime(match.pid);
+      }
+
       // 6. Get pane dimensions
       const dims = getPaneDimensions(tmuxTarget);
       if (!dims) continue;
@@ -471,8 +594,13 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
 /**
  * Re-check that a specific pane still has the expected CLI process running.
  * Used to validate an adopt target right before the actual adoption.
+ *
+ * `filterCliId` MUST mirror the filter discovery used. A Cursor agent installed
+ * under the generic name `agent` is only recognized as a CLI when filtered to
+ * 'cursor' (see cliIdForComm); without the same filter here, discovery surfaces
+ * the session but validation re-identifies nothing and wrongly reports it exited.
  */
-export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number): boolean {
+export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number, filterCliId?: CliId): boolean {
   // Verify the tmux pane still exists and get its shell PID
   let panePid: number;
   try {
@@ -487,7 +615,7 @@ export function validateTmuxAdoptTarget(tmuxTarget: string, expectedPid: number)
   }
 
   // Search the process tree for the expected CLI PID
-  const match = findCliProcess(panePid, 3);
+  const match = findCliProcess(panePid, 3, filterCliId);
   return match !== undefined && match.pid === expectedPid;
 }
 
@@ -511,7 +639,7 @@ export function validateAdoptTargetState(target: AdoptableSession | NonNullable<
     ? target.originalCliPid
     : ('cliPid' in target ? target.cliPid : undefined);
   if (!target.tmuxTarget || !pid) return 'missing';
-  return validateTmuxAdoptTarget(target.tmuxTarget, pid) ? 'alive' : 'missing';
+  return validateTmuxAdoptTarget(target.tmuxTarget, pid, target.cliId) ? 'alive' : 'missing';
 }
 
 // 仅供单测使用 —— 暴露内部 helper，方便覆盖跨平台 (Linux /proc vs macOS ps/lsof/pgrep)

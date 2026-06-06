@@ -1,6 +1,7 @@
 import { networkInterfaces } from 'node:os';
 import type { BackendType } from './adapters/backend/types.js';
 import { probeTmuxFunctional } from './setup/ensure-tmux.js';
+import { resolveWorkerHttpHost } from './utils/worker-http.js';
 
 /** Get the first non-loopback IPv4 address, fallback to localhost. */
 function getLocalIp(): string {
@@ -80,6 +81,7 @@ export const config = {
   },
   web: {
     host: process.env.WEB_HOST ?? '0.0.0.0',
+    workerHost: resolveWorkerHttpHost(),
     get externalHost() { return getWebExternalHost(); },
     // Single reverse-proxy port per daemon that fronts every session's web
     // terminal under `/s/{sessionId}`. Lets dev-machine users forward one port
@@ -91,6 +93,18 @@ export const config = {
     port: Number(process.env.BOTMUX_DASHBOARD_PORT) || 7891,
     get externalHost() { return getDashboardExternalHost(); },
     ipcBasePort: Number(process.env.BOTMUX_DAEMON_IPC_BASE_PORT) || 7892,
+    /** Public read-only mode (default ON): GET/HEAD surfaces — sessions,
+     *  schedules, SSE — are reachable WITHOUT a token, so a stale dashboard
+     *  link degrades to read-only browsing instead of a dead "link expired"
+     *  wall. Write actions (POST/PATCH/DELETE) and the raw PTY log always
+     *  require the rotated token. Opt out with
+     *  BOTMUX_DASHBOARD_PUBLIC_READONLY=false.
+     *
+     *  NOTE: this env value is only the DEFAULT. Once the toggle is changed on
+     *  the dashboard Settings page, `~/.botmux/config.json` holds the value and
+     *  permanently takes precedence over this env var（UI 接管后改 env 不再生效；
+     *  要回到 env 控制需删掉 config.json 里的 dashboard.publicReadOnly）. */
+    publicReadOnly: (process.env.BOTMUX_DASHBOARD_PUBLIC_READONLY ?? 'true').toLowerCase() !== 'false',
   },
   screenAnalyzer: {
     enabled: (process.env.SCREEN_ANALYZER_ENABLED ?? '').toLowerCase() === 'true',

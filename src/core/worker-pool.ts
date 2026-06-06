@@ -27,8 +27,10 @@ import { buildMarkdownCard, buildContextualReplyCard } from '../im/lark/md-card.
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
+import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
+import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
@@ -140,7 +142,11 @@ export function isRelayableRealSession(ds: DaemonSession): boolean {
 // per-session via `ds.streamingCardForced` (manually summon a live card).
 function streamingCardDisabled(ds: DaemonSession): boolean {
   if (ds.streamingCardForced) return false;
-  try { return getBot(ds.larkAppId).config.disableStreamingCard === true; } catch { return false; }
+  try {
+    const cfg = getBot(ds.larkAppId).config;
+    return cfg.disableStreamingCard === true
+      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId));
+  } catch { return false; }
 }
 
 // Per-bot opt-in: the writable terminal link to embed directly in the streaming
@@ -1282,6 +1288,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     larkAppSecret: botCfg.larkAppSecret,
+    brand: normalizeBrand(botCfg.brand),
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
@@ -1703,6 +1710,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           const cardMsgId = await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
           ds.tuiPromptCardId = cardMsgId;
+          publishAttentionPatch(ds);
         } catch (err) {
           logger.warn(`[${t}] Failed to post TUI prompt card: ${err}`);
         }
@@ -1719,6 +1727,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           ds.tuiPromptCardId = undefined;
           ds.tuiPromptOptions = undefined;
+          publishAttentionPatch(ds);
         }
         break;
       }
@@ -2075,6 +2084,9 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   //     to re-probe via session.log / traces.jsonl fds).
   //   - mtr: worker tails MTR's sqlite transcript, resolving by native sid
   //     when discovery has one or by adopted cwd as a fallback.
+  //   - cursor: worker maps the adopt pid → its open store.db fd → chatId →
+  //     the append-only agent-transcript JSONL, then harvests final replies
+  //     from there (cursor-agent never calls `botmux send`).
   // Other CLIs fall back to legacy screen-capture only.
   const adoptedCliId = adopted.cliId ?? 'claude-code';
   if (adopted.source === 'herdr' && adoptedCliId === 'claude-code' && !adopted.sessionId) {
@@ -2093,7 +2105,11 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     adoptedCliId === 'claude-code' && adopted.sessionId
       ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
       : undefined;
-  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr';
+  // cursor: worker resolves the agent-transcript JSONL from the adopt pid's
+  // open store.db fd (chatId), or from cliSessionId (= chatId) when discovery
+  // captured it — so adopt must forward the pid + cwd like the other
+  // transcript-backed CLIs.
+  const isStructuredBridge = adoptedCliId === 'codex' || adoptedCliId === 'coco' || adoptedCliId === 'mtr' || adoptedCliId === 'cursor';
   const adoptBackendType = adopted.source === 'herdr' ? 'herdr' : adopted.zellijPaneId ? 'zellij' : 'tmux';
 
   const initMsg: DaemonToWorker = {
@@ -2112,6 +2128,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
     webPort: ds.session.webPort,
     larkAppId: botCfg.larkAppId,
     larkAppSecret: botCfg.larkAppSecret,
+    brand: normalizeBrand(botCfg.brand),
     botName: bot.botName,
     botOpenId: bot.botOpenId,
     locale: botLocale(botCfg),
@@ -2165,6 +2182,14 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   ds.worker = worker;
   ds.spawnedAt = Date.now();
   ds.cliVersion = '';
+  // Persist the bridge worker's pid, exactly like forkWorker. Without it the
+  // session row keeps pid=null, so `botmux list` (and killStalePids) judge an
+  // adopt session by "process dead AND no bmx-<id> tmux" — but adopt attaches to
+  // the user's OWN tmux/zellij pane, never a bmx-* session, so the heuristic
+  // always reported it unrecoverable and auto-pruned it to "closed" right after
+  // /adopt. Storing the worker pid (botmux's bridge, NOT the user's CLI) makes
+  // liveness consistent with normal sessions and leaves the user's CLI alone.
+  sessionStore.updateSessionPid(ds.session.sessionId, worker.pid ?? null);
   logger.info(`[${t}] Adopt worker forked (pid: ${worker.pid}, target: ${adopted.tmuxTarget ?? `${adopted.zellijSession}/${adopted.zellijPaneId}`})`);
 
   ds.exitEventEmitted = false;

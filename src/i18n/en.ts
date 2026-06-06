@@ -159,6 +159,11 @@ export const messages: Record<string, string> = {
 
   // ─── Command responses ───────────────────────────────────────────────────
   'cmd.no_active_session': 'No active session in this topic.',
+  'cmd.card.owner_only': '⚠️ Only the bot owner can use /card.',
+  'cmd.card.off_ok': '🔕 Streaming cards turned off for this chat; status now shows via the in-place pending card (no withdrawal). /card on to restore; /card summons a live card.',
+  'cmd.card.on_ok': '🔔 Streaming cards restored for this chat. The next status update posts a live card again.',
+  'cmd.card.fail': '⚠️ Operation failed: {reason}',
+  'cmd.card.usage': 'Usage: /card (summon) | /card off (suppress for this chat) | /card on (restore)',
   'cmd.card.not_ready': 'Terminal not ready yet — the streaming card will appear once the session is up.',
   'cmd.card.private_not_ready': '🔒 Terminal not ready yet — send /card again once the session is up.',
   'cmd.card.private_not_group': '🔒 Private cards only work in regular group chats — topic groups / DMs are unsupported (Feishu limitation).',
@@ -197,6 +202,8 @@ export const messages: Record<string, string> = {
   'cmd.adopt.pane_not_found': 'tmux pane not found: {pane}',
   'cmd.adopt.target_exited': '⚠️ Target CLI session has exited.',
   'cmd.adopt.success': '📡 Adopted {cliName} · {project} ({pane})',
+  'cmd.detach.success': '⏏ Disconnected. The original CLI session is untouched.',
+  'cmd.detach.not_adopted': 'This topic is not an /adopt session; /detach does not apply. Use /close to end the botmux session (which also kills the CLI).',
   'cmd.codex_app_adopt.no_threads': 'No resumable Codex App conversation found.',
   'cmd.codex_app_adopt.thread_not_found': 'Codex App conversation not found: {threadId}',
   'cmd.codex_app_adopt.list_failed': 'Failed to read Codex App conversations: {error}',
@@ -289,6 +296,7 @@ export const messages: Record<string, string> = {
   'help.heading_adopt': '📡 Session adopt:',
   'help.adopt': '/adopt              - Adopt a running CLI session on this host',
   'help.adopt_pane': '/adopt <tmux_pane>  - Adopt a specific tmux pane',
+  'help.detach': '/detach             - Disconnect this topic from the adopted session (the original CLI is untouched; /disconnect is an alias)',
   'help.heading_login': '🔐 User OAuth:',
   'help.login': '/login              - Lark user OAuth (lets you download images etc. from third-party cards)',
   'help.login_status': '/login status       - Show auth status',
@@ -301,7 +309,20 @@ export const messages: Record<string, string> = {
   'help.revoke': '@bot /revoke @someone  - Revoke their talk access (you can @ several at once); /revoke (no target) revokes the whole-chat grant',
   'help.heading_group': '🆕 One-shot session group:',
   'help.group': '/group <name>  (alias /g)  - Auto-create a group and invite you (the whole group = one CLI session)',
+  'help.list_slash': '/list-slash-command  (alias /slash)  - List the slash commands available now (fixed allowlist / custom config / auto-discovered)',
   'help.help': '/help       - Show this help',
+
+  // ─── /list-slash-command ─────────────────────────────────────────────────
+  'slashlist.heading': '🧩 Slash commands available now ({cliName})',
+  'slashlist.part_builtin': '① Fixed allowlist (builtin passthrough):',
+  'slashlist.part_custom': '② User-configured (bots.json · customPassthroughCommands):',
+  'slashlist.part_custom_empty': '(none configured — add customPassthroughCommands: ["/xxx"] to this bot in bots.json to allow more)',
+  'slashlist.part_discovered': '③ Auto-discovered ({cliName} .claude commands / skills / plugins):',
+  'slashlist.part_discovered_empty': '(none found — no commands/skills/plugins under {dir} or ~/.claude)',
+  'slashlist.more': '… {n} more not shown',
+  'slashlist.mcp_note': 'ℹ️ MCP /mcp__<server>__<prompt> commands need a live handshake to enumerate and are not listed here. Detected MCP servers: {servers}',
+  'slashlist.col_cmd': 'Command',
+  'slashlist.col_desc': 'Description',
 
   // ─── AI system prompt (Claude Code: --append-system-prompt) ──────────────
   'ai.routing.intro': 'You are connected to a Lark (Feishu) topic group. The user is reading on Lark and CANNOT see your terminal output.',
