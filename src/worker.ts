@@ -2866,36 +2866,53 @@ function startScreenUpdates(): void {
   renderer = new TerminalRenderer(renderCols, renderRows);
   let lastSentStatus: string | undefined;
   let lastTextSnapshotHash = '';
+  let lastContent = '';
+  // PTY-activity watermark of the last tick that actually captured. The screen
+  // is derived entirely from pane output, which always reaches us through
+  // onPtyData (it updates lastPtyActivityAtMs and feeds the renderer in the
+  // same place). So when this hasn't advanced, the screen is byte-identical to
+  // lastContent and a capture is pure waste.
+  let lastSnapshotPtyActivity = -1;
   screenUpdateTimer = setInterval(() => {
     if (awaitingFirstPrompt) return;
     let status: RuntimeScreenStatus = isPromptReady ? 'idle' : 'working';
     if (screenAnalyzer?.isAnalyzing) status = 'analyzing';
 
     void (async () => {
-      let content: string;
-      let changed: boolean;
+      let content = lastContent;
+      let changed = false;
 
-      // Preferred path: pipe-pane backends pull a fresh viewport snapshot
-      // from tmux every tick. This eliminates the accumulated-buffer drift
-      // that produced duplicated/staircase text in 'text' display mode.
-      const pipeText = await snapshotToText(backend, renderCols, renderRows, { filter: true });
-      if (pipeText) {
-        content = pipeText.content;
-        const hash = pipeText.ansi;
-        changed = hash !== lastTextSnapshotHash;
-        lastTextSnapshotHash = hash;
-        // Refresh the unfiltered cache that ScreenAnalyzer reads from. Same
-        // tmux call would otherwise need to fire twice per tick.
-        if (changed) {
-          const rawSnap = await snapshotToText(backend, renderCols, renderRows, { filter: false });
-          if (rawSnap) lastAnalyzerSnapshot = rawSnap.content;
+      // Capture only when the pane has emitted output since our last snapshot.
+      // During idle (the steady state for a parked session) this skips a tmux
+      // capture-pane + a throwaway xterm-headless instantiation every tick —
+      // the dominant per-session background cost — while the status-transition
+      // send below still fires off the cached content.
+      const ptyActivity = lastPtyActivityAtMs;
+      if (ptyActivity !== lastSnapshotPtyActivity) {
+        lastSnapshotPtyActivity = ptyActivity;
+        // Preferred path: pipe-pane backends pull a fresh viewport snapshot
+        // from tmux every tick. This eliminates the accumulated-buffer drift
+        // that produced duplicated/staircase text in 'text' display mode.
+        const pipeText = await snapshotToText(backend, renderCols, renderRows, { filter: true });
+        if (pipeText) {
+          content = pipeText.content;
+          const hash = pipeText.ansi;
+          changed = hash !== lastTextSnapshotHash;
+          lastTextSnapshotHash = hash;
+          // Refresh the unfiltered cache that ScreenAnalyzer reads from. Same
+          // tmux call would otherwise need to fire twice per tick.
+          if (changed) {
+            const rawSnap = await snapshotToText(backend, renderCols, renderRows, { filter: false });
+            if (rawSnap) lastAnalyzerSnapshot = rawSnap.content;
+          }
+        } else if (renderer) {
+          const snap = renderer.snapshot();
+          content = snap.content;
+          changed = snap.changed;
+        } else {
+          return;
         }
-      } else if (renderer) {
-        const snap = renderer.snapshot();
-        content = snap.content;
-        changed = snap.changed;
-      } else {
-        return;
+        lastContent = content;
       }
 
       const usageAware = usageLimitTracker.classify(content, status);
