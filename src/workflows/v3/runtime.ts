@@ -1024,15 +1024,15 @@ export async function runWorkflow(
   }
 
   function startGate(node: V3Node, instanceId?: string): void {
-    const waitId = `${node.id}-gate`; // MVP: one gate per node
+    // Instance-level waitId so a revisit's fresh gate (`A#002-gate`) gets its own
+    // wait file + card nonce, never overwriting the superseded `A#001-gate`
+    // (stale-card protection).  Legacy/no-instance → `<nodeId>-gate`.
+    const waitId = `${instanceId ?? node.id}-gate`;
     const gate = normalizeGateWaitInput(node.humanGate!);
-    // gateDispatched carries instanceId (journal layer, accepted in 3239cf8);
-    // DEFERRED: instance-level waitId + stale-card guard (code review) — needs a
-    // waitId migration / card-action change, off the A→B→C critical path.
     appendEvent(journalPath, { type: 'gateDispatched', nodeId: node.id, ...(instanceId ? { instanceId } : {}), waitId });
 
     if (gateMode === 'suspend') {
-      writePendingWait(runDir, { waitId, nodeId: node.id, ...gate });
+      writePendingWait(runDir, { waitId, nodeId: node.id, ...(instanceId ? { instanceId } : {}), ...gate });
       return;
     }
 
@@ -1243,14 +1243,16 @@ export async function runWorkflow(
     return true;
   }
 
-  function pendingGateWaits(state: Map<string, { status: string }>): V3PendingGate[] {
+  function pendingGateWaits(state: Map<string, { status: string; effectiveInstanceId?: string }>): V3PendingGate[] {
     const waits: V3PendingGate[] = [];
     for (const node of dag.nodes) {
       if (state.get(node.id)?.status !== 'gateWaiting') continue;
       const prompt = node.humanGate?.prompt;
       if (!prompt) continue;
       const gate = normalizeGateWaitInput(node.humanGate!);
-      waits.push({ nodeId: node.id, waitId: `${node.id}-gate`, ...gate });
+      // Instance-level waitId mirrors startGate (stale-card protection).
+      const instanceId = state.get(node.id)?.effectiveInstanceId;
+      waits.push({ nodeId: node.id, waitId: `${instanceId ?? node.id}-gate`, ...gate });
     }
     return waits;
   }

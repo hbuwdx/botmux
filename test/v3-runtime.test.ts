@@ -415,7 +415,7 @@ describe('runWorkflow — humanGate suspend mode', () => {
         runDir: join(base, 'gate-run'),
         pendingWaits: [{
           nodeId: 'deploy',
-          waitId: 'deploy-gate',
+          waitId: 'deploy#001-gate',
           prompt: '批准部署？',
           options: ['approve', 'reject'],
           approveOptions: ['approve'],
@@ -423,7 +423,7 @@ describe('runWorkflow — humanGate suspend mode', () => {
         }],
       });
       expect(runNodeCalls).toBe(0);
-      expect(readWait(first.runDir, 'deploy-gate')).toMatchObject({
+      expect(readWait(first.runDir, 'deploy#001-gate')).toMatchObject({
         status: 'pending',
         nodeId: 'deploy',
         prompt: '批准部署？',
@@ -432,11 +432,11 @@ describe('runWorkflow — humanGate suspend mode', () => {
       expect(events.some((e) => e.type === 'gateDispatched' && e.nodeId === 'deploy')).toBe(true);
       expect(events.some((e) => e.type === 'nodeDispatched' && e.nodeId === 'deploy')).toBe(false);
 
-      resolveWait(first.runDir, 'deploy-gate', 'approved', 'ou_reviewer');
+      resolveWait(first.runDir, 'deploy#001-gate', 'approved', 'ou_reviewer');
       appendEvent(join(first.runDir, 'journal.ndjson'), {
         type: 'gateResolved',
         nodeId: 'deploy',
-        waitId: 'deploy-gate',
+        waitId: 'deploy#001-gate',
         resolution: 'approved',
         by: 'ou_reviewer',
       });
@@ -484,7 +484,7 @@ describe('runWorkflow — humanGate suspend mode', () => {
       if (outcome.reason !== 'awaitingGate') throw new Error('expected awaitingGate outcome');
       expect(outcome.pendingWaits).toEqual([{
         nodeId: 'approval',
-        waitId: 'approval-gate',
+        waitId: 'approval#001-gate',
         prompt: '批准？',
         options: ['approve', 'reject'],
         approveOptions: ['approve'],
@@ -492,7 +492,7 @@ describe('runWorkflow — humanGate suspend mode', () => {
       }]);
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
       expect(events.some((e) => e.type === 'nodeSucceeded' && e.nodeId === 'research')).toBe(true);
-      expect(readWait(outcome.runDir, 'approval-gate')?.status).toBe('pending');
+      expect(readWait(outcome.runDir, 'approval#001-gate')?.status).toBe('pending');
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -527,7 +527,7 @@ describe('runWorkflow — humanGate suspend mode', () => {
       const outcome = await runWorkflow(dag, deps, { baseDir: base });
 
       expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'succeeded' });
-      expect(readWait(outcome.runDir, 'deploy-gate')).toMatchObject({ status: 'approved', by: 'ou_cli' });
+      expect(readWait(outcome.runDir, 'deploy#001-gate')).toMatchObject({ status: 'approved', by: 'ou_cli' });
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

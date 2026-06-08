@@ -311,6 +311,12 @@ export function resolveV3GateClick(
   if (snap.nodes.get(wait.nodeId)?.status !== 'gateWaiting') {
     return { kind: 'stale-run', reason: 'stale-node' };
   }
+  // Stale-card guard: the wait must belong to the node's CURRENT effective
+  // instance.  A revisit makes a fresh instance + gate (`A#002-gate`); an old
+  // `A#001-gate` card must NOT resolve the new instance's gate.
+  if (wait.instanceId && wait.instanceId !== snap.nodes.get(wait.nodeId)?.effectiveInstanceId) {
+    return { kind: 'stale-run', reason: 'stale-node' };
+  }
   if (!canResolveGateWait(wait, input.by)) return { kind: 'unauthorized' };
   const resolution = selectedResolution(wait, input.selected);
   if (!resolution) return { kind: 'stale-run', reason: 'no-wait' };
@@ -871,11 +877,14 @@ function reconcileOneRun(
   const repost: V3PendingGate[] = [];
   let resume = false;
   for (const nodeId of gateWaitingNodes) {
-    const waitId = `${nodeId}-gate`;
+    // Instance-level waitId mirrors startGate so recovery reads the SAME wait
+    // file the dispatch wrote (stale-card protection).
+    const instanceId = snap.nodes.get(nodeId)?.effectiveInstanceId;
+    const waitId = `${instanceId ?? nodeId}-gate`;
     let wait = readWait(runDir, waitId);
     if (!wait) {
       const gate = dagNodeGate.get(nodeId) ?? normalizeGateWaitInput({ prompt: '(humanGate — 等待人工审批)' });
-      wait = writePendingWait(runDir, { waitId, nodeId, ...gate });
+      wait = writePendingWait(runDir, { waitId, nodeId, ...(instanceId ? { instanceId } : {}), ...gate });
     }
     if (wait.status === 'pending') {
       repost.push({
