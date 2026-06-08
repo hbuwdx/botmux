@@ -290,7 +290,9 @@ export function prepareSandbox(opts: {
   // `botmux` shim → THIS build's cli.js, so in-sandbox `botmux send` hits relay
   // mode (and never the host's shared dist / bots.json).
   const shim = join(shimBin, 'botmux');
-  writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(distCliJs())} "$@"\n`);
+  // Run the relocated runtime (see /botmux-runtime binds below), NOT the cli.js
+  // at its host path — that path can be shadowed by the project clone.
+  writeFileSync(shim, `#!/bin/sh\nexec node /botmux-runtime/dist/cli.js "$@"\n`);
   chmodSync(shim, 0o755);
 
   // Toolchain that lives under $HOME and must survive the scoped-home mask:
@@ -300,16 +302,11 @@ export function prepareSandbox(opts: {
   const nodeDir = dirname(process.execPath);                 // .../installation/bin
   toolchainRo.push(dirname(nodeDir));                         // .../installation (node + npm-global CLIs)
   const pkgRoot = dirname(dirname(distCliJs()));             // <build>/dist's parent (the package root)
-  // Bind ONLY the compiled build (dist) + deps + package.json — NOT the whole
-  // package root. Otherwise the agent could read the source tree / .git / docs
-  // under /root/iserver. (The cli.js shim + node_modules resolution still work.)
-  toolchainRo.push(join(pkgRoot, 'dist'));
-  toolchainRo.push(join(pkgRoot, 'package.json'));
-  // Bind node_modules at the package-root PATH cli.js resolves against. It may
-  // be a symlink (worktree → main checkout); a bind mount follows the symlink
-  // to the real deps, so we mount it AT pkgRoot/node_modules (not at its
-  // realpath — that would expose the shared checkout's dir instead).
-  toolchainRo.push(join(pkgRoot, 'node_modules'));
+  // NOTE: the botmux runtime (dist / node_modules / package.json) is deliberately
+  // NOT bound here at its real pkgRoot path. It's relocated to /botmux-runtime
+  // below. Binding it at pkgRoot lets the project clone shadow it whenever a bot
+  // dogfoods botmux (workingDir == the botmux dir), which broke the `botmux send`
+  // shim (clone has no dist/node_modules — they're .gitignore'd). [B3]
   // The CLI binary's own dir + its symlink-resolved dir. Critical: claude/coco
   // live in ~/.local/bin (under the masked home), so without this they're not
   // found inside the sandbox and exec fails. (codex happened to be under the
@@ -324,6 +321,16 @@ export function prepareSandbox(opts: {
   const args = buildSandboxArgs(plan);
   // Mount the shim bin at a fixed, host-absent path and prepend it to PATH.
   args.push('--ro-bind', shimBin, '/sbxbin');
+  // Botmux runtime at a FIXED sandbox-private path (/botmux-runtime), bound LAST
+  // and at a path no user projectMount can equal — so the project clone can
+  // never shadow it (B3), and we never drop a read-only package.json onto the
+  // user's clone. The shim runs /botmux-runtime/dist/cli.js; node resolves deps
+  // from /botmux-runtime/node_modules (walk-up from dist/), and package.json
+  // gives cli.js its "type":"module". node_modules may be a symlink → the bind
+  // follows it to the real deps.
+  args.push('--ro-bind', join(pkgRoot, 'dist'), '/botmux-runtime/dist');
+  args.push('--ro-bind-try', join(pkgRoot, 'package.json'), '/botmux-runtime/package.json');
+  args.push('--ro-bind', join(pkgRoot, 'node_modules'), '/botmux-runtime/node_modules');
   // botmux skill/plugin dir (claude `--plugin-dir` points here; carries the
   // botmux-send etc. skills, no secrets). Re-exposed read-only on top of the
   // masked ~/.botmux so the agent's skills load (but bots.json stays hidden).
