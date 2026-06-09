@@ -84,6 +84,7 @@ import {
   ensureTerminalWorkerPort,
 } from './core/session-manager.js';
 import { beginReplyTargetTurn, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
+import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { sweepIdleWorkers } from './core/idle-worker-sweeper.js';
 import { handleCardAction } from './im/lark/card-handler.js';
 import type { CardHandlerDeps } from './im/lark/card-handler.js';
@@ -3382,6 +3383,16 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Restore active sessions from previous run
   await restoreActiveSessions(activeSessions);
 
+  // Sweep orphan sandbox overlays left by a previous run's crash/kill: any
+  // <dataDir>/sandboxes/<sid> whose session is no longer active gets its
+  // overlays unmounted and its dirs removed (plus the /var/tmp home scratch).
+  // Active sessions keep theirs — a same-topic worker reuses the upper changeset.
+  try {
+    sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
+  } catch (err: any) {
+    logger.warn(`[sandbox-sweep] failed: ${err?.message ?? err}`);
+  }
+
   const idleWorkerSweepTimer = setInterval(() => {
     const suspended = sweepIdleWorkers(activeSessions);
     if (suspended.length > 0) {
@@ -3389,6 +3400,22 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     }
   }, 60_000);
   idleWorkerSweepTimer.unref?.();
+
+  // Periodic sandbox reconciler: the daemon's SIGKILL straggler-reaper (and any
+  // worker SIGKILL) bypasses worker-side killCli(), so the overlay mounts +
+  // upper/work dirs of a killed-but-still-active sandboxed session would leak for
+  // the rest of this daemon's lifetime (one daemon per bot can run for days). The
+  // startup sweep alone can't catch a session that dies AFTER boot. This re-runs
+  // the sweep on a timer: it reclaims active sessions whose overlays are already
+  // unmounted (= worker/CLI dead) without ever tearing down a live mount.
+  const sandboxReconcileTimer = setInterval(() => {
+    try {
+      sweepOrphanSandboxes(config.session.dataDir, new Set([...activeSessions.values()].map(ds => ds.session.sessionId)));
+    } catch (err: any) {
+      logger.warn(`[sandbox-reconcile] failed: ${err?.message ?? err}`);
+    }
+  }, 120_000);
+  sandboxReconcileTimer.unref?.();
 
   await attachColdWorkflowRuns(cfg.larkAppId);
 

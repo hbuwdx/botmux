@@ -96,6 +96,16 @@ export interface Session {
   cliSessionId?: string;
   /** CLI used to spawn this session — stamped on every save so closed sessions retain it. */
   cliId?: import('./adapters/cli/types.js').CliId;
+  /**
+   * Sandbox decision RECORDED AT SESSION CREATION (overlay file-isolation). The
+   * live bot flag (BotConfig.sandbox) can be toggled later, but a session's
+   * sandbox status is frozen here at creation so a restore/restart never
+   * retroactively sandboxes (or un-sandboxes) a historical session. Undefined on
+   * sessions created before this field existed → treated as not sandboxed.
+   */
+  sandbox?: boolean;
+  /** Per-bot privacy masks recorded alongside `sandbox` at session creation. */
+  sandboxHidePaths?: string[];
   /** Persisted adopt metadata — allows adopt sessions to survive daemon restarts.
    *  Either tmuxTarget (tmux backend) OR zellijSession+zellijPaneId (zellij). */
   adoptedFrom?: {
@@ -229,7 +239,7 @@ export type TermActionKey =
 
 /** Messages sent from Daemon to Worker */
 export type DaemonToWorker =
-  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; model?: string; disableCliBypass?: boolean; sandbox?: boolean; backendType: BackendType; prompt: string; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
+  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; model?: string; disableCliBypass?: boolean; sandbox?: boolean; sandboxHidePaths?: string[]; backendType: BackendType; prompt: string; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
   | { type: 'message'; content: string; turnId?: string }
   | { type: 'raw_input'; content: string }
   | { type: 'close' }

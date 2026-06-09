@@ -164,7 +164,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/sandbox-land/:action', (_req, res, pa
   const d = computeSandboxDiff(config.session.dataDir, params.sessionId, locLand);
   if (!d.ok) return jsonRes(res, 200, { ok: false, error: d.error });
   if (d.empty) return jsonRes(res, 200, { ok: false, error: t('sandbox.no_changes_left', undefined, locLand) });
-  const a = applySandboxDiff(wd, d.patch, locLand);
+  const a = applySandboxDiff(wd, config.session.dataDir, params.sessionId, locLand);
   jsonRes(res, 200, a.ok ? { ok: true, files: d.files, insertions: d.insertions, deletions: d.deletions, workingDir: wd } : { ok: false, error: a.error });
 });
 

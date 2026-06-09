@@ -66,7 +66,7 @@ import { ZellijObserveBackend } from './adapters/backend/zellij-observe-backend.
 import { zellijEnv } from './setup/ensure-zellij.js';
 import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend } from './adapters/backend/session-backend-selector.js';
-import { prepareSandbox, startOutboxWatcher, sandboxEnabled } from './adapters/backend/sandbox.js';
+import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled } from './adapters/backend/sandbox.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { IdleDetector } from './utils/idle-detector.js';
@@ -90,6 +90,8 @@ let cliAdapter: CliAdapter | null = null;
 let backend: SessionBackend | null = null;
 let cliPidMarker: string | null = null;  // path to .botmux-cli-pids/<pid>
 let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox outbox watcher
+let sandboxCleanup: (() => void) | null = null;      // unmount overlays + rm the per-session sandbox tree
+let sandboxTeardownDone = false;                     // guards the exit-time best-effort teardown from double-running / running on suspend-for-resume
 let idleDetector: IdleDetector | null = null;
 let isTmuxMode = false;
 /** Adopt-bridge mode using TmuxPipeBackend: not a tmux attach client, all
@@ -3448,29 +3450,81 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // bwrap directly) and tmux (the tmux pane's command becomes `bwrap … -- cli`);
   // env is carried via bwrap --setenv (see prepareSandbox), not the backend.
   const sandboxOn = cfg.sandbox === true || sandboxEnabled();
-  if (sandboxOn && (effectiveBackendType === 'pty' || effectiveBackendType === 'tmux') && process.env.SESSION_DATA_DIR) {
+  if (sandboxOn) {
+    // FAIL-SAFE (not fail-open): when the sandbox is requested, a missing
+    // precondition (no SESSION_DATA_DIR, or a backend we can't wrap) must be a
+    // HARD ERROR, never a silent skip — otherwise the CLI would spawn UNSANDBOXED
+    // with full host write access and no log, the exact opposite of the
+    // oncall-untrusted-agent invariant. In normal operation worker-pool sets
+    // SESSION_DATA_DIR and the backend is pty/tmux, so this never trips.
+    const dataDir = process.env.SESSION_DATA_DIR;
+    if (effectiveBackendType !== 'pty' && effectiveBackendType !== 'tmux') {
+      const msg = `Sandbox ENABLED but backend "${effectiveBackendType}" is not sandboxable (only pty/tmux) — aborting spawn to avoid an unsandboxed run`;
+      log(msg);
+      throw new Error(msg);
+    }
+    if (!dataDir) {
+      const msg = 'Sandbox ENABLED but SESSION_DATA_DIR is unset — aborting spawn to avoid an unsandboxed run';
+      log(msg);
+      throw new Error(msg);
+    }
     try {
-      const sbx = prepareSandbox({
-        enabled: sandboxOn,
-        cliId: cfg.cliId,
-        sessionId: cfg.sessionId,
-        sourceWorkingDir: cfg.workingDir,
-        dataDir: process.env.SESSION_DATA_DIR,
-        cliBin: cliAdapter.resolvedBin,
-        cliArgs: args,
-      });
-      if (sbx) {
-        spawnBin = sbx.bin;
-        spawnArgs = sbx.args;
-        spawnCwd = sbx.workDir;
-        Object.assign(childEnv, sbx.env);
-        if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
-        // session-id is FORCED here so a relayed send can't target another session.
-        sandboxStopWatcher = startOutboxWatcher(sbx.outbox, childEnv, cfg.sessionId);
-        log(`Sandbox ON (${cfg.cliId}): work=${sbx.workDir} outbox=${sbx.outbox}`);
+      if (willReattachPersistent) {
+        // Daemon-restart reattach to a persistent (tmux/herdr/zellij) pane whose
+        // bwrap'd CLI is STILL ALIVE. backend.spawn() ignores bin/args here and
+        // just re-attaches, and the live CLI is bound to its own namespace-pinned
+        // overlay — so we must NOT unmount/remount (prepareSandbox would leave a
+        // duplicate host-side overlay the CLI isn't using). We only re-wire the
+        // outbox watcher (so the live CLI's `botmux send` keeps being serviced)
+        // and the cleanup ref (so close/exit reclaims the residue). No re-prep.
+        const att = attachSandboxOutbox({ sessionId: cfg.sessionId, dataDir });
+        if (att) {
+          if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
+          if (sandboxCleanup) { try { sandboxCleanup(); } catch { /* */ } }
+          sandboxCleanup = att.cleanup;
+          sandboxStopWatcher = startOutboxWatcher(att.outbox, childEnv, cfg.sessionId);
+          log(`Sandbox REATTACH (${cfg.cliId}): live pane CLI kept, re-wired outbox=${att.outbox} (no remount)`);
+        } else {
+          // No sandbox tree on disk for a session we're reattaching to: the
+          // pane's CLI may be unsandboxed (sandbox enabled after it spawned). Do
+          // NOT remount under a live CLI; just continue the reattach as-is.
+          log(`Sandbox REATTACH (${cfg.cliId}): no on-disk sandbox tree — reattaching live pane without re-prep`);
+        }
+      } else {
+        const sbx = prepareSandbox({
+          enabled: sandboxOn,
+          cliId: cfg.cliId,
+          sessionId: cfg.sessionId,
+          sourceWorkingDir: cfg.workingDir,
+          dataDir,
+          cliBin: cliAdapter.resolvedBin,
+          cliArgs: args,
+          hidePaths: cfg.sandboxHidePaths ?? [],
+        });
+        if (sbx) {
+          spawnBin = sbx.bin;
+          spawnArgs = sbx.args;
+          // In the overlay model the child still chdirs to projectMount (via bwrap
+          // --chdir), so spawnCwd stays the real workingDir; the overlay merged dir
+          // is bound there. sbx.workDir is the UPPER changeset (for landing), NOT a cwd.
+          Object.assign(childEnv, sbx.env);
+          if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } }
+          if (sandboxCleanup) { try { sandboxCleanup(); } catch { /* */ } }
+          sandboxCleanup = sbx.cleanup;
+          // session-id is FORCED here so a relayed send can't target another session.
+          sandboxStopWatcher = startOutboxWatcher(sbx.outbox, childEnv, cfg.sessionId);
+          log(`Sandbox ON (${cfg.cliId}): upper=${sbx.workDir} outbox=${sbx.outbox}`);
+        } else {
+          // Sandbox was requested but prepareSandbox returned null (a required
+          // overlay mount failed, or non-Linux). Fail safe: do NOT silently run
+          // unsandboxed — surface a hard error so the session doesn't leak.
+          log(`Sandbox ENABLED but prepare returned null (mount failed / unsupported) — aborting spawn to avoid an unsandboxed run`);
+          throw new Error('sandbox requested but could not be established');
+        }
       }
     } catch (err: any) {
-      log(`Sandbox prepare failed (${err.message}) — falling back to direct spawn`);
+      log(`Sandbox prepare failed (${err.message}) — aborting (sandbox is a hard requirement when enabled)`);
+      throw err;
     }
   }
 
@@ -3694,11 +3748,17 @@ function killCli(): void {
     try { unlinkSync(cliPidMarker); } catch { /* already gone */ }
     cliPidMarker = null;
   }
-  // Stop the sandbox outbox watcher (the per-session sandbox tree is left in
-  // place so a same-topic resume reuses the same clone + scoped config).
+  // Stop the sandbox outbox watcher, then unmount the overlays + remove the
+  // per-session sandbox tree. In the overlay model the upper layer (the
+  // changeset) must be landed BEFORE close — `/land` runs while the session is
+  // still active, so by cleanup time anything worth keeping is already applied.
   if (sandboxStopWatcher) {
     try { sandboxStopWatcher(); } catch { /* */ }
     sandboxStopWatcher = null;
+  }
+  if (sandboxCleanup) {
+    try { sandboxCleanup(); } catch { /* */ }
+    sandboxCleanup = null;
   }
   isPromptReady = false;
   pendingMessages.length = 0;
@@ -4494,6 +4554,16 @@ process.on('message', async (raw: unknown) => {
       try { backend?.kill(); } catch { /* detach best-effort */ }
       backend = null;
       isPromptReady = false;
+      // Suspend INTENDS to resume later: preserve the sandbox overlay mount + the
+      // upper changeset across the suspension (on resume, prepareSandbox re-mounts
+      // over the SAME upper). So we stop the outbox watcher (no live CLI to serve)
+      // but DO NOT run sandboxCleanup (which would unmount + rm the changeset). We
+      // also disarm the exit-time teardown so process.exit(0) below can't reclaim
+      // it. (Crash/SIGKILL of a suspended-but-active session is still backstopped
+      // by the daemon's periodic sandbox reconciler.)
+      if (sandboxStopWatcher) { try { sandboxStopWatcher(); } catch { /* */ } sandboxStopWatcher = null; }
+      sandboxCleanup = null;           // drop the ref WITHOUT calling it (keep the mount)
+      sandboxTeardownDone = true;      // make the process.on('exit') hook a no-op
       cleanup();
       process.exit(0);
     }
@@ -4544,5 +4614,37 @@ setInterval(() => {
     process.exit(0);
   }
 }, 30_000).unref();
+
+// ─── Sandbox crash-time teardown ─────────────────────────────────────────────
+// killCli() (which unmounts the overlays + rm's the per-session tree) only runs
+// from the SIGTERM/SIGINT/disconnect/watchdog handlers and the close/suspend IPC
+// cases. An UNCAUGHT exception or unhandled rejection kills the process WITHOUT
+// any of those firing, so without this hook a crashed sandboxed worker would
+// leak BOTH overlay mounts (mount-table growth) + its upper/work dirs (disk leak)
+// per crash. We run a minimal, synchronous, best-effort sandbox teardown here so
+// the overlay/dir residue is reclaimed even on an abnormal exit. (SIGKILL still
+// can't be trapped — the daemon-side sweep + the periodic reconciler below are
+// the backstop for that.)
+function teardownSandboxBestEffort(): void {
+  if (sandboxTeardownDone) return;
+  sandboxTeardownDone = true;
+  try { sandboxStopWatcher?.(); } catch { /* */ }
+  sandboxStopWatcher = null;
+  try { sandboxCleanup?.(); } catch { /* */ }
+  sandboxCleanup = null;
+}
+process.on('exit', () => { teardownSandboxBestEffort(); });
+process.on('uncaughtException', (err) => {
+  try { log(`Uncaught exception — tearing down sandbox before exit: ${err?.stack ?? err}`); } catch { /* */ }
+  teardownSandboxBestEffort();
+  try { cleanup(); } catch { /* */ }
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason: any) => {
+  try { log(`Unhandled rejection — tearing down sandbox before exit: ${reason?.stack ?? reason}`); } catch { /* */ }
+  teardownSandboxBestEffort();
+  try { cleanup(); } catch { /* */ }
+  process.exit(1);
+});
 
 log('Worker started, waiting for init...');

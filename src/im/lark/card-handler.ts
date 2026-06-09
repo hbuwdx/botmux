@@ -179,7 +179,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const d = computeSandboxDiff(config.session.dataDir, sid, loc);
     if (!d.ok) return JSON.parse(buildLandResultCard('failed', d.error, loc));
     if (d.empty) return JSON.parse(buildLandResultCard('discarded', '', loc));
-    const a = applySandboxDiff(wd, d.patch, loc);
+    const a = applySandboxDiff(wd, config.session.dataDir, sid, loc);
     if (!a.ok) return JSON.parse(buildLandResultCard('failed', a.error, loc));
     logger.info(`Land applied: ${d.files} files (+${d.insertions}/-${d.deletions}) → ${wd}`);
     return JSON.parse(buildLandResultCard('applied', t('card.land.applied_body', { files: d.files, ins: d.insertions, del: d.deletions, dir: wd }, loc), loc));

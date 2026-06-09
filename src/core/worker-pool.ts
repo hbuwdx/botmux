@@ -1279,6 +1279,22 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   const cwd = rawCwd && existsSync(rawCwd) ? rawCwd : homedir();
   if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — falling back to ${cwd}`);
 
+  // Sandbox decision is RECORDED ON THE SESSION at creation and reused on
+  // restore — so toggling the live bot flag never retroactively (un)sandboxes a
+  // historical session. A brand-new session (resume=false) with no recorded
+  // decision adopts the live bot flag; a restore (resume=true) with no recorded
+  // decision predates the sandbox feature → stays NOT sandboxed.
+  if (ds.session.sandbox === undefined) {
+    if (!resume) {
+      ds.session.sandbox = botCfg.sandbox === true;
+      ds.session.sandboxHidePaths = botCfg.sandboxHidePaths ?? [];
+    } else {
+      ds.session.sandbox = false;
+      ds.session.sandboxHidePaths = [];
+    }
+    sessionStore.updateSession(ds.session);
+  }
+
   // Guard against double-fork: if a worker is already running, kill it first
   if (ds.worker && !ds.worker.killed) {
     logger.warn(`[${t}] Worker already running (pid: ${ds.worker.pid}), killing before re-fork`);
@@ -1352,7 +1368,10 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
     cliPathOverride: botCfg.cliPathOverride,
     model: botCfg.model,
     disableCliBypass: botCfg.disableCliBypass === true,
-    sandbox: botCfg.sandbox === true,
+    // Use the decision recorded on the session (above), NOT the live bot flag, so
+    // historical sessions never get retroactively sandboxed on restart.
+    sandbox: ds.session.sandbox === true,
+    sandboxHidePaths: ds.session.sandboxHidePaths ?? [],
     backendType: botCfg.backendType ?? config.daemon.backendType,
     prompt,
     resume,
