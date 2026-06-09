@@ -148,7 +148,40 @@ export function seedScopedConfig(cliId: string, scopedHome: string, projectMount
   }
 
   if (scope.claudeTrust && projectMount) seedClaudeTrust(scopedHome, projectMount);
+  rewriteSeededRuntimePaths(dstRoot);
   return true;
+}
+
+/** Any seeded config that references the host botmux runtime (e.g. claude
+ *  settings.json's AskUserQuestion → Lark-card hook `<node> <host>/dist/cli.js
+ *  hook claude-code`, codex hooks.json) must point at the IN-SANDBOX relocated
+ *  runtime — otherwise the host path isn't bound in the sandbox and the hook
+ *  fails (exit 127 if even the hardcoded node path differs, else exit 1
+ *  "cannot find cli.js"). Rewrite any `…/dist/cli.js` → /botmux-runtime/dist/cli.js
+ *  and any absolute `…/bin/node` → `node` (resolved on the sandbox PATH). */
+function rewriteSeededRuntimePaths(dstRoot: string): void {
+  const fixStr = (s: string): string =>
+    s.replace(/"[^"]*\/dist\/cli\.js"/g, '"/botmux-runtime/dist/cli.js"')
+     .replace(/"[^"]*\/bin\/node"/g, '"node"');
+  const walk = (o: any): any => {
+    if (typeof o === 'string') return o.includes('/dist/cli.js') ? fixStr(o) : o;
+    if (Array.isArray(o)) return o.map(walk);
+    if (o && typeof o === 'object') { for (const k of Object.keys(o)) o[k] = walk(o[k]); return o; }
+    return o;
+  };
+  let names: string[] = [];
+  try { names = readdirSync(dstRoot); } catch { return; }
+  for (const name of names) {
+    if (!name.endsWith('.json')) continue;
+    const p = join(dstRoot, name);
+    let data: any;
+    try { data = JSON.parse(readFileSync(p, 'utf8')); } catch { continue; }
+    const before = JSON.stringify(data);
+    data = walk(data);
+    if (JSON.stringify(data) !== before) {
+      try { writeFileSync(p, JSON.stringify(data, null, 2)); } catch { /* */ }
+    }
+  }
 }
 
 /** Write a minimal `<scopedHome>/.claude.json` that pre-accepts folder-trust for
