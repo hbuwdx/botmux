@@ -52,6 +52,7 @@ import {
   getSessionCost,
   getSessionTokenUsage,
   formatNumber,
+  __resetSessionUsageCachesForTest,
   type SessionCost,
 } from '../src/core/cost-calculator.js';
 
@@ -87,6 +88,7 @@ function userLine(text = 'hello'): string {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 beforeEach(() => {
+  __resetSessionUsageCachesForTest();
   vi.mocked(existsSync).mockReset();
   vi.mocked(readFileSync).mockReset();
   vi.mocked(findCodexRolloutBySessionId).mockReset();
@@ -536,6 +538,32 @@ describe('getSessionTokenUsage', () => {
     expect(findAidenLatestCheckpointBySessionId).toHaveBeenCalledWith('aiden-sid', undefined, undefined);
   });
 
+  it('Aiden skips human/tool messages even when they carry usage metadata', () => {
+    vi.mocked(findAidenLatestCheckpointBySessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/aiden-sid/checkpoint.json');
+    setupJsonl(JSON.stringify({
+      checkpoint: {
+        channel_values: {
+          messages: [
+            { type: 'human', content: 'hi', usage_metadata: { input_tokens: 999, output_tokens: 999 } },
+            { type: 'tool', content: 'result', usage_metadata: { input_tokens: 888, output_tokens: 888 } },
+            { type: 'ai', usage_metadata: { input_tokens: 100, output_tokens: 20 } },
+          ],
+        },
+      },
+    }));
+
+    expect(getSessionTokenUsage({ cliId: 'aiden', sessionId: 'aiden-sid' })).toEqual({
+      in: 100,
+      out: 20,
+      inputTokens: 100,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      turns: 1,
+      model: '',
+    });
+  });
+
   it('falls back to locating Aiden checkpoint by botmux session id', () => {
     vi.mocked(findAidenLatestCheckpointByBotmuxSessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/native-sid/checkpoint.json');
     setupJsonl(JSON.stringify({
@@ -555,6 +583,178 @@ describe('getSessionTokenUsage', () => {
     })?.in).toBe(10);
     expect(findAidenLatestCheckpointBySessionId).toHaveBeenCalledWith('botmux-sid', undefined, '/workspace/current');
     expect(findAidenLatestCheckpointByBotmuxSessionId).toHaveBeenCalledWith('botmux-sid', undefined, '/workspace/current');
+  });
+
+  it('Codex only counts token_count snapshots and picks up the rollout model', () => {
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue('codex-sid');
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue('/home/testuser/.codex/sessions/rollout-codex-sid.jsonl');
+    setupJsonl([
+      // Should provide model: turn_context carries the active model.
+      JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.3-codex' } }),
+      // Should NOT count: a stray assistant-message-shaped line in the rollout.
+      JSON.stringify({ type: 'response_item', message: { usage: { input_tokens: 999, output_tokens: 999 } } }),
+      // Should count (latest snapshot wins): cumulative token_count events.
+      JSON.stringify({
+        type: 'event_msg',
+        payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 150, cached_input_tokens: 60, output_tokens: 30 } } },
+      }),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toEqual({
+      in: 150,
+      out: 30,
+      inputTokens: 150,
+      outputTokens: 30,
+      cacheReadTokens: 60,
+      cacheCreateTokens: 0,
+      turns: 0,
+      model: 'gpt-5.3-codex',
+    });
+  });
+
+  it('CoCo only counts assistant response_meta usage, not stray usage-shaped lines', () => {
+    setupJsonl([
+      // Should count: assistant message with response_meta.usage.
+      JSON.stringify({
+        message: {
+          message: {
+            role: 'assistant',
+            response_meta: { usage: { prompt_tokens: 100, completion_tokens: 10 } },
+            extra: { _source_model: 'openrouter-2o' },
+          },
+        },
+      }),
+      // Should NOT count: telemetry-style event with payload.usage.
+      JSON.stringify({ payload: { usage: { prompt_tokens: 999, completion_tokens: 999 } } }),
+      // Should NOT count: top-level usage on a non-message event.
+      JSON.stringify({ usage: { prompt_tokens: 888, completion_tokens: 888 } }),
+      // Should NOT count: tool-role message carrying usage.
+      JSON.stringify({
+        message: {
+          message: {
+            role: 'tool',
+            response_meta: { usage: { prompt_tokens: 777, completion_tokens: 777 } },
+          },
+        },
+      }),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({ cliId: 'coco', sessionId: 'coco-sid' })).toEqual({
+      in: 100,
+      out: 10,
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      turns: 1,
+      model: 'openrouter-2o',
+    });
+  });
+
+  it('getSessionCost shares the message.id dedup with getSessionTokenUsage', () => {
+    const block = (id: string, input: number, output: number) =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          model: 'claude-sonnet-4-20250514',
+          usage: { input_tokens: input, output_tokens: output },
+        },
+      });
+    setupJsonl([block('msg_a', 100, 50), block('msg_a', 100, 50), block('msg_b', 200, 80)].join('\n'));
+
+    expect(getSessionCost('s1', '/tmp')).toEqual({
+      inputTokens: 300,
+      outputTokens: 130,
+      cacheReadTokens: 0,
+      cacheCreateTokens: 0,
+      turns: 2,
+      model: 'claude-sonnet-4-20250514',
+    });
+  });
+
+  it('caches codex rollout path resolution across calls', () => {
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue('codex-sid');
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue('/home/testuser/.codex/sessions/rollout-codex-sid.jsonl');
+    setupJsonl(JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 1, output_tokens: 1 } } },
+    }));
+
+    getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' });
+    getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' });
+
+    expect(findCodexSessionIdByBotmuxSessionId).toHaveBeenCalledTimes(1);
+    expect(findCodexRolloutBySessionId).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a missed codex path lookup only after the retry window', () => {
+    vi.mocked(findCodexSessionIdByBotmuxSessionId).mockReturnValue(undefined);
+    vi.mocked(findCodexRolloutBySessionId).mockReturnValue(undefined);
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      nowSpy.mockReturnValue(1_000_000);
+      expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toBeNull();
+      expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toBeNull();
+      expect(findCodexRolloutBySessionId).toHaveBeenCalledTimes(1);
+
+      nowSpy.mockReturnValue(1_000_000 + 31_000);
+      expect(getSessionTokenUsage({ cliId: 'codex', sessionId: 'botmux-sid' })).toBeNull();
+      expect(findCodexRolloutBySessionId).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('caches the aiden checkpoint lookup briefly', () => {
+    vi.mocked(findAidenLatestCheckpointBySessionId).mockReturnValue('/home/testuser/.aiden/checkpoints/ws/aiden-sid/checkpoint.json');
+    setupJsonl(JSON.stringify({
+      checkpoint: { channel_values: { messages: [{ type: 'ai', usage_metadata: { input_tokens: 1, output_tokens: 1 } }] } },
+    }));
+
+    getSessionTokenUsage({ cliId: 'aiden', sessionId: 'aiden-sid' });
+    getSessionTokenUsage({ cliId: 'aiden', sessionId: 'aiden-sid' });
+
+    expect(findAidenLatestCheckpointBySessionId).toHaveBeenCalledTimes(1);
+  });
+
+  it('counts a multi-block Claude turn (same message.id) once', () => {
+    const block = (id: string, input: number, output: number, cacheRead = 0, cacheCreate = 0) =>
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          id,
+          model: 'claude-sonnet-4-20250514',
+          usage: {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_input_tokens: cacheRead,
+            cache_creation_input_tokens: cacheCreate,
+          },
+        },
+      });
+    // A text block and a tool_use block of the same turn are written as two
+    // JSONL lines sharing one message.id and one usage snapshot — count once.
+    setupJsonl([
+      block('msg_a', 100, 50, 10, 5),
+      block('msg_a', 100, 50, 10, 5),
+      block('msg_b', 200, 80),
+    ].join('\n'));
+
+    expect(getSessionTokenUsage({
+      cliId: 'claude-code',
+      sessionId: 's1',
+      cwd: '/tmp',
+    })).toEqual({
+      in: 315,
+      out: 130,
+      inputTokens: 300,
+      outputTokens: 130,
+      cacheReadTokens: 10,
+      cacheCreateTokens: 5,
+      turns: 2,
+      model: 'claude-sonnet-4-20250514',
+    });
   });
 });
 

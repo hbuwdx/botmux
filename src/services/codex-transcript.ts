@@ -208,25 +208,41 @@ function codexHistoryCliSessionId(parsed: unknown): string | undefined {
     : undefined;
 }
 
+/** history.jsonl grows without bound; recent sessions live at the end, so a
+ *  bounded tail window keeps the lookup O(window) instead of O(file). */
+const HISTORY_TAIL_BYTES = 4 * 1024 * 1024;
+
 /** Find the newest Codex session whose history entry includes a botmux
  *  session id. Fresh dashboard rows often only know botmux's UUID; Codex's
  *  rollout filename uses its own UUID, and history.jsonl is the durable bridge
- *  between the two. */
-export function findCodexSessionIdByBotmuxSessionId(botmuxSessionId: string): string | undefined {
+ *  between the two. Only the trailing `maxTailBytes` of the file is scanned. */
+export function findCodexSessionIdByBotmuxSessionId(
+  botmuxSessionId: string,
+  opts?: { maxTailBytes?: number },
+): string | undefined {
   if (!botmuxSessionId) return undefined;
   const historyPath = codexHistoryPath();
   if (!existsSync(historyPath)) return undefined;
   try {
     const size = statSync(historyPath).size;
+    const maxTailBytes = Math.max(1, opts?.maxTailBytes ?? HISTORY_TAIL_BYTES);
+    const start = Math.max(0, size - maxTailBytes);
+    const length = size - start;
     const fd = openSync(historyPath, 'r');
-    const buf = Buffer.alloc(size);
+    const buf = Buffer.alloc(length);
     try {
-      readSync(fd, buf, 0, size, 0);
+      readSync(fd, buf, 0, length, start);
     } finally {
       closeSync(fd);
     }
+    let text = buf.toString('utf8');
+    if (start > 0) {
+      // The window almost certainly opens mid-line — drop the partial line.
+      const firstNewline = text.indexOf('\n');
+      text = firstNewline === -1 ? '' : text.slice(firstNewline + 1);
+    }
     const marker = JSON.stringify(botmuxSessionId).slice(1, -1);
-    const lines = buf.toString('utf8').trimEnd().split('\n');
+    const lines = text.trimEnd().split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i]!;
       if (!line.includes(marker)) continue;

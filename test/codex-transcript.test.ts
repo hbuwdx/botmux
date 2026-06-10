@@ -84,6 +84,30 @@ describe('findCodexRolloutBySessionId', () => {
 });
 
 describe('findCodexSessionIdByBotmuxSessionId', () => {
+  it('bounds the history scan to the requested tail window', () => {
+    const prevCodexHome = process.env.CODEX_HOME;
+    const codexHome = mkdtempSync(join(tmpdir(), 'codex-home-'));
+    const historyPath = join(codexHome, 'history.jsonl');
+    process.env.CODEX_HOME = codexHome;
+    try {
+      const oldLine = JSON.stringify({ session_id: 'old-codex-sid', text: 'hello <session_id>botmux-tail-sid</session_id>' });
+      const padding = Array.from({ length: 50 }, (_, i) =>
+        JSON.stringify({ session_id: `pad-${i}`, text: 'x'.repeat(100) }),
+      ).join('\n');
+      writeFileSync(historyPath, `${oldLine}\n${padding}\n`);
+
+      // The marker lives outside a 1 KiB tail window — must not be found
+      // (and, crucially, the whole multi-MB file must not be slurped).
+      expect(findCodexSessionIdByBotmuxSessionId('botmux-tail-sid', { maxTailBytes: 1024 })).toBeUndefined();
+      // The default window is large enough to cover the entire file here.
+      expect(findCodexSessionIdByBotmuxSessionId('botmux-tail-sid')).toBe('old-codex-sid');
+    } finally {
+      if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = prevCodexHome;
+      rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
   it('honors CODEX_HOME and returns the newest history entry for a botmux session', () => {
     const prevCodexHome = process.env.CODEX_HOME;
     const codexHome = mkdtempSync(join(tmpdir(), 'codex-home-'));
