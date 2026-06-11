@@ -311,7 +311,11 @@ describe('Worker ready: set_display_mode re-sync', () => {
     );
   });
 
-  it('prompt_ready delivers buffered follow-up input AFTER the raw slash command, once', async () => {
+  it('prompt_ready bundles the buffered follow-up ONTO the raw_input IPC (single atomic message)', async () => {
+    // Two separate IPCs would race inside the worker: its async message
+    // handlers don't serialize, and raw_input awaits 200ms between sendText
+    // and Enter — a separate `message` IPC could write into that window. The
+    // follow-up must therefore ride on the raw_input message itself.
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({
       worker: fakeWorker,
@@ -326,14 +330,13 @@ describe('Worker ready: set_display_mode re-sync', () => {
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
-    const sentTypes = fakeWorker.send.mock.calls.map((c: any[]) => c[0]?.type);
-    const rawIdx = sentTypes.indexOf('raw_input');
-    const msgIdx = sentTypes.indexOf('message');
-    expect(rawIdx).toBeGreaterThanOrEqual(0);
-    expect(msgIdx).toBeGreaterThan(rawIdx);
+    // Exactly ONE outbound IPC carrying both payloads — never a separate
+    // `message` IPC that could race the raw_input handler.
+    expect(fakeWorker.send).toHaveBeenCalledTimes(1);
     expect(fakeWorker.send).toHaveBeenCalledWith({
-      type: 'message',
-      content: '<user_message>另外帮我顺手看下 CI</user_message>',
+      type: 'raw_input',
+      content: '/goal ship the onboarding flow',
+      followUpContent: '<user_message>另外帮我顺手看下 CI</user_message>',
     });
     expect(ds.pendingRawInput).toBeUndefined();
     expect(ds.pendingFollowUpInput).toBeUndefined();
@@ -341,7 +344,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     fakeWorker.send.mockClear();
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
-    expect(fakeWorker.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'message' }));
+    expect(fakeWorker.send).not.toHaveBeenCalled();
   });
 
   it('prompt_ready without pending raw input never emits the buffered follow-up alone', async () => {
@@ -356,6 +359,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
     __testOnly_setupWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
-    expect(fakeWorker.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'message' }));
+    expect(fakeWorker.send).not.toHaveBeenCalled();
   });
 });
