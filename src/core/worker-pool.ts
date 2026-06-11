@@ -14,6 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
 import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
+import { fallbackTurnId } from './reply-target.js';
 import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
@@ -1572,8 +1573,11 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
 function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
   const cb = requireCallbacks();
   const t = tag(ds);
+  // Worker messages without a turn of their own (first streaming card, crash
+  // notices) anchor to the session's current reply-target turn so a shared
+  // fold-back topic keeps them in-thread instead of leaking top-level.
   const scopedReply = (content: string, msgType?: string, turnId?: string) =>
-    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, turnId);
+    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, fallbackTurnId(ds, turnId));
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
   const loc = botLocale(botCfg);
@@ -2234,7 +2238,7 @@ function deliverFinalOutput(
   const cb = requireCallbacks();
   const effectiveCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
   const scopedReply = (content: string, msgType?: string, turnId?: string) =>
-    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, turnId);
+    cb.sessionReply(sessionAnchorId(ds), content, msgType, ds.larkAppId, fallbackTurnId(ds, turnId));
   setTimeout(async () => {
     let pendingCardId: string | undefined;
     let pendingQuoteTargetId: string | undefined;

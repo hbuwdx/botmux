@@ -30,6 +30,7 @@ import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-sto
 import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput } from '../../core/session-manager.js';
 import { publishAttentionPatch } from '../../core/session-activity.js';
+import { fallbackTurnId } from '../../core/reply-target.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
@@ -42,7 +43,7 @@ import { t, localeForBot, isLocale, type Locale } from '../../i18n/index.js';
 
 export interface CardHandlerDeps {
   activeSessions: Map<string, DaemonSession>;
-  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string) => Promise<string>;
+  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
   lastRepoScan: Map<string, ProjectInfo[]>;
   workflowApprovalDeps?: WorkflowApprovalHandlerDeps;
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
@@ -145,8 +146,12 @@ function validateCardCliBinding(ds: DaemonSession, value?: Record<string, string
 
 export async function handleCardAction(data: CardActionData, deps: CardHandlerDeps, larkAppId?: string): Promise<any> {
   const { activeSessions, lastRepoScan } = deps;
-  const sessionReply = (rid: string, content: string, msgType?: string) =>
-    deps.sessionReply(rid, content, msgType, larkAppId);
+  // turnId is forwarded only when the caller actually has a turn anchor
+  // (e.g. the pendingRepo confirmation) — most card actions have none.
+  const sessionReply = (rid: string, content: string, msgType?: string, turnId?: string) =>
+    turnId !== undefined
+      ? deps.sessionReply(rid, content, msgType, larkAppId, turnId)
+      : deps.sessionReply(rid, content, msgType, larkAppId);
   const action = data?.action;
   const value = action?.value;
   const cardMessageId = data?.context?.open_message_id ?? data?.open_message_id;
@@ -1564,7 +1569,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       targetDs.pendingSender = undefined;
       targetDs.pendingFollowUps = undefined;
       forkWorker(targetDs, prompt);
-      await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget));
+      // A card click has no turn of its own — anchor the confirmation to the
+      // session's current reply-target turn so a shared fold-back topic keeps
+      // it in-thread (same leak as the /repo command path).
+      await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(targetDs, undefined));
       logger.info(`[${tag(targetDs)}] Repo selected: ${dirPath}, spawning CLI`);
     } else {
       // Mid-session repo switch — close old session, start fresh.

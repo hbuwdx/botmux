@@ -317,7 +317,7 @@ function invalidConfiguredWorkingDirs(ds: DaemonSession | undefined, larkAppId: 
 
 export interface CommandHandlerDeps {
   activeSessions: Map<string, DaemonSession>;
-  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string) => Promise<string>;
+  sessionReply: (rootId: string, content: string, msgType?: string, larkAppId?: string, turnId?: string) => Promise<string>;
   getActiveCount: () => number;
   lastRepoScan: Map<string, import('../services/project-scanner.js').ProjectInfo[]>;
 }
@@ -877,8 +877,12 @@ export async function handleCommand(
   larkAppId?: string,
 ): Promise<void> {
   const { activeSessions, getActiveCount, lastRepoScan } = deps;
+  // Command replies carry the triggering messageId as the turnId so a shared
+  // (chat-scope) session triggered from inside a Lark thread anchors them into
+  // that thread (resolveSessionReplyTarget turnId gate) instead of leaking a
+  // plain top-level message.
   const sessionReply = (rid: string, content: string, msgType?: string) =>
-    deps.sessionReply(rid, content, msgType, larkAppId);
+    deps.sessionReply(rid, content, msgType, larkAppId, message.messageId);
   const ds = larkAppId ? activeSessions.get(sessionKey(rootId, larkAppId)) : undefined;
   const logTag = ds ? tag(ds) : rootId.substring(0, 12);
   const loc: Locale = localeForBot(ds?.larkAppId ?? larkAppId);

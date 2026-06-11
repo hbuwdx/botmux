@@ -721,6 +721,7 @@ describe('handleCommand', () => {
         expect.stringContaining('会话已关闭'),
         'interactive',
         LARK_APP_ID,
+        'msg_001',
       );
       const replyArgs = (deps.sessionReply as any).mock.calls[0];
       const cardJson = replyArgs[1] as string;
@@ -739,6 +740,7 @@ describe('handleCommand', () => {
         expect.stringContaining('没有活跃的会话'),
         undefined,
         LARK_APP_ID,
+        'msg_001',
       );
     });
   });
@@ -761,6 +763,7 @@ describe('handleCommand', () => {
         expect.stringContaining('正在重启'),
         undefined,
         LARK_APP_ID,
+        'msg_001',
       );
     });
 
@@ -778,6 +781,7 @@ describe('handleCommand', () => {
         expect.stringContaining('进程已终止'),
         undefined,
         LARK_APP_ID,
+        'msg_001',
       );
     });
 
@@ -793,6 +797,7 @@ describe('handleCommand', () => {
         expect.stringContaining('进程已终止'),
         undefined,
         LARK_APP_ID,
+        'msg_001',
       );
     });
 
@@ -806,6 +811,7 @@ describe('handleCommand', () => {
         expect.stringContaining('没有活跃的会话'),
         undefined,
         LARK_APP_ID,
+        'msg_001',
       );
     });
   });
@@ -990,6 +996,41 @@ describe('handleCommand', () => {
   // ─── /repo ──────────────────────────────────────────────────────────────
 
   describe('/repo', () => {
+    it('shared fold-back: every command reply carries the triggering messageId as turnId', async () => {
+      // A shared (chat-scope) session triggered from inside a Lark thread
+      // records currentReplyTarget={turnId: messageId}. Command replies must
+      // pass that same messageId through sessionReply so the turnId gate in
+      // resolveSessionReplyTarget anchors them into the topic instead of
+      // leaking a plain top-level message.
+      const ds = makeDaemonSession({ scope: 'chat' } as Partial<DaemonSession>);
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1', { messageId: 'msg_turn' }), deps, LARK_APP_ID);
+
+      const call = vi.mocked(deps.sessionReply).mock.calls[0];
+      expect(call[4]).toBe('msg_turn');
+    });
+
+    it('pendingRepo first-spawn: the 已选择 confirmation carries the triggering messageId as turnId', async () => {
+      const ds = makeDaemonSession({
+        pendingRepo: true,
+        scope: 'chat',
+        currentReplyTarget: { rootMessageId: 'om_topic_root', turnId: 'msg_prime', updatedAt: new Date().toISOString() },
+      } as Partial<DaemonSession>);
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, [
+        { name: 'project-a', path: '/home/testuser/project-a', branch: 'main' },
+      ]);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1', { messageId: 'msg_prime' }), deps, LARK_APP_ID);
+
+      const selected = vi.mocked(deps.sessionReply).mock.calls.find(
+        (c) => typeof c[1] === 'string' && (c[1] as string).includes('已选择'),
+      );
+      expect(selected, 'no 已选择 confirmation was sent').toBeDefined();
+      expect(selected![4]).toBe('msg_prime');
+    });
+
     it('should prompt to run /repo first when index given but no cached scan', async () => {
       const ds = makeDaemonSession();
       const deps = makeDeps(ds);
@@ -1075,6 +1116,7 @@ describe('handleCommand', () => {
         expect.any(String),
         'interactive',
         LARK_APP_ID,
+        'msg_001',
       );
     });
 
