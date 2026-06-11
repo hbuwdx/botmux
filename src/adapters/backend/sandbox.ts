@@ -40,12 +40,23 @@ export function mountOverlay(opts: { lower: string; upper: string; work: string;
   for (const d of [opts.upper, opts.work, opts.merged]) {
     try { mkdirSync(d, { recursive: true }); } catch { /* */ }
   }
-  const r = spawnSync('mount', [
-    '-t', 'overlay', 'overlay',
-    '-o', `lowerdir=${opts.lower},upperdir=${opts.upper},workdir=${opts.work}`,
-    opts.merged,
-  ], { stdio: 'pipe' });
-  return r.status === 0;
+  const optStr = `lowerdir=${opts.lower},upperdir=${opts.upper},workdir=${opts.work}`;
+  // A privileged (root) daemon uses the kernel overlayfs driver — fastest. A
+  // non-root daemon CANNOT mount kernel overlayfs even inside bwrap's userns (the
+  // hardened mount env rejects it on this kernel), so it falls back to
+  // fuse-overlayfs — a userspace overlay needing no root, only /dev/fuse. Same
+  // lowerdir/upperdir/workdir semantics → landing, the bridge redirect, and the
+  // privacy masks all work identically; only the mount mechanism differs.
+  // BOTMUX_SANDBOX_FUSE=1 forces the userspace path even as root (escape hatch +
+  // lets a root daemon exercise exactly what unprivileged users hit).
+  const forceFuse = process.env.BOTMUX_SANDBOX_FUSE === '1';
+  if (!forceFuse && process.getuid?.() === 0) {
+    const r = spawnSync('mount', ['-t', 'overlay', 'overlay', '-o', optStr, opts.merged], { stdio: 'pipe' });
+    if (r.status === 0) return true;
+    // root but kernel mount failed (rare) → fall through to fuse-overlayfs
+  }
+  const f = spawnSync('fuse-overlayfs', ['-o', optStr, opts.merged], { stdio: 'pipe' });
+  return f.status === 0;
 }
 
 /** True iff `path` is currently a mountpoint (host-side overlay still mounted). */
@@ -57,8 +68,45 @@ export function isMounted(path: string): boolean {
  *  umount fails (busy fd from a still-draining child). No-op if not a mount. */
 export function unmountOverlay(merged: string): void {
   if (!isMounted(merged)) return; // not a mountpoint
-  const r = spawnSync('umount', [merged], { stdio: 'ignore' });
-  if (r.status !== 0) spawnSync('umount', ['-l', merged], { stdio: 'ignore' });
+  // kernel overlay → `umount`; fuse-overlayfs → `fusermount -u` (a non-root
+  // daemon can't `umount` its own fuse mount); lazy `-l` as a last resort for a
+  // busy fd from a still-draining child.
+  if (spawnSync('umount', [merged], { stdio: 'ignore' }).status === 0) return;
+  if (spawnSync('fusermount', ['-u', merged], { stdio: 'ignore' }).status === 0) return;
+  spawnSync('umount', ['-l', merged], { stdio: 'ignore' });
+}
+
+/** Verify (and best-effort auto-install) the sandbox runtime deps so the user
+ *  needn't pre-install: `bubblewrap` always, `fuse-overlayfs` when the userspace
+ *  overlay path is used (non-root daemon, or BOTMUX_SANDBOX_FUSE=1). Installs via
+ *  the system package manager when the daemon can (root, or passwordless sudo);
+ *  otherwise logs a one-line manual-install hint and returns false so the caller
+ *  fails the spawn (never a silent unsandboxed run). Returns true if all present. */
+function ensureSandboxDeps(needFuse: boolean): boolean {
+  const has = (cmd: string) => spawnSync('sh', ['-c', `command -v ${cmd}`], { stdio: 'ignore' }).status === 0;
+  const missing: string[] = [];
+  if (!has('bwrap')) missing.push('bubblewrap');
+  if (needFuse && !has('fuse-overlayfs')) missing.push('fuse-overlayfs');
+  if (!missing.length) return true;
+
+  const pm =
+    has('apt-get') ? ['apt-get', 'install', '-y', ...missing] :
+    has('dnf')     ? ['dnf', 'install', '-y', ...missing] :
+    has('yum')     ? ['yum', 'install', '-y', ...missing] :
+    has('apk')     ? ['apk', 'add', ...missing] :
+    has('pacman')  ? ['pacman', '-S', '--noconfirm', ...missing] :
+    null;
+  const isRoot = process.getuid?.() === 0;
+  if (pm) {
+    // root installs directly; a non-root daemon tries passwordless sudo only
+    // (never blocks on an interactive prompt).
+    const argv = isRoot ? pm : ['sudo', '-n', ...pm];
+    const r = spawnSync(argv[0], argv.slice(1), { stdio: 'ignore', timeout: 180_000 });
+    if (r.status === 0 && !missing.some(m => !has(m === 'bubblewrap' ? 'bwrap' : m))) return true;
+  }
+  const guide = pm ? `${isRoot ? '' : 'sudo '}${pm.join(' ')}` : `install: ${missing.join(', ')}`;
+  console.error(`[sandbox] missing deps (${missing.join(', ')}); auto-install unavailable — install manually then retry: ${guide}`);
+  return false;
 }
 
 // ───────────────────────────── argv builder ──────────────────────────────────
@@ -188,6 +236,11 @@ export function prepareSandbox(opts: {
 }): SandboxSpawn | null {
   if (!opts.enabled) return null;
   if (process.platform !== 'linux') return null; // overlayfs + bwrap are Linux-only
+
+  // Auto-provision deps so the user needn't pre-install (bwrap; + fuse-overlayfs
+  // for the rootless/userspace overlay path). Fail the spawn if unavailable.
+  const needFuse = process.env.BOTMUX_SANDBOX_FUSE === '1' || process.getuid?.() !== 0;
+  if (!ensureSandboxDeps(needFuse)) return null;
 
   const sessionRoot = join(opts.dataDir, 'sandboxes', opts.sessionId);
   const outbox = join(sessionRoot, 'outbox');
