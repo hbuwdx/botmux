@@ -1141,6 +1141,257 @@ button.primary {
   font-size: 12px;
 }
 
+/* ── 看板视图（multica Issues 风格）：横排状态列 + 简洁卡片 ─────────────────── */
+.sessions-kanban {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 4px 2px 12px;
+}
+
+.sessions-kanban[hidden] {
+  display: none;
+}
+
+.kanban-column {
+  flex: 0 0 280px;
+  display: flex;
+  flex-direction: column;
+  min-height: 320px;
+  max-height: calc(100vh - 250px);
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-muted) 72%, transparent);
+}
+
+.kanban-column > header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 12px 8px;
+}
+
+.kanban-col-icon {
+  display: inline-flex;
+  flex: none;
+}
+
+.kanban-col-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.kanban-column h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.kanban-col-count {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.kanban-needs-you .kanban-col-icon { color: var(--danger); }
+.kanban-starting .kanban-col-icon { color: var(--warning); }
+.kanban-working .kanban-col-icon { color: var(--success); }
+.kanban-idle .kanban-col-icon { color: var(--faint); }
+.kanban-closed .kanban-col-icon { color: var(--accent); }
+
+.kanban-col-list {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 2px 8px 10px;
+  overflow-y: auto;
+}
+
+.kanban-col-empty {
+  padding: 32px 0;
+  color: var(--faint);
+  font-size: 12px;
+  text-align: center;
+}
+
+.kanban-col-more {
+  padding: 6px 0 2px;
+  color: var(--faint);
+  font-size: 11px;
+  text-align: center;
+}
+
+.kanban-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+  box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.kanban-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface-raised));
+}
+
+.kanban-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.kanban-card-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kanban-card-id {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* 「详情」按钮平时隐身，悬停/聚焦卡片才浮现——保持卡面与 multica 一样干净 */
+.kanban-card-details {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  opacity: 0;
+}
+
+.kanban-card:hover .kanban-card-details,
+.kanban-card:focus-within .kanban-card-details {
+  opacity: 1;
+}
+
+.kanban-card-title {
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.kanban-card-desc {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kanban-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 2px;
+  min-width: 0;
+}
+
+.kanban-card-owner {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.kanban-card-owner > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kanban-card-updated {
+  flex: none;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+/* ── 页面内终端弹窗（看板卡片点击落点）───────────────────────────────────── */
+.term-modal {
+  width: min(1100px, 94vw);
+  height: min(78vh, 820px);
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.term-modal[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.term-modal-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.term-modal-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.term-modal-title strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-modal-actions {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.term-modal-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.term-modal-frame {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+}
+
+.term-modal-loading {
+  margin: auto;
+  color: var(--faint);
+  font-size: 13px;
+}
+
 /* 图标方按钮：会话卡片操作行一排，也被详情抽屉 .actions 复用（chat-scope 的
    「打开群聊」走同一个 .card-act）。图标宽度与语言无关，en/zh 都稳定一行，修掉了
    EN 文案更宽把「关闭」挤下行的崩布局。基础按钮外观放在通用 .card-act 选择器上，
@@ -1667,6 +1918,22 @@ input.row-select,
   }
   .sessions-board {
     grid-template-columns: 1fr;
+  }
+  /* 窄屏看板：列改纵向堆叠，高度交还内容 */
+  .sessions-kanban {
+    flex-direction: column;
+  }
+  .kanban-column {
+    flex: none;
+    min-height: 0;
+    max-height: none;
+  }
+  .kanban-col-list {
+    overflow-y: visible;
+  }
+  .term-modal {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 24px);
   }
   .filter-check-group {
     grid-template-columns: repeat(2, minmax(0, 1fr));

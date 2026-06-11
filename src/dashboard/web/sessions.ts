@@ -1,5 +1,6 @@
 // Sessions page: filter bar, status board/table, detail drawer with locate/resume/close.
 import {
+  normalizeSessionsViewMode,
   readStoredBoardOrder,
   readStoredSessionsViewMode,
   type SessionsViewMode,
@@ -60,6 +61,41 @@ const BOARD_COLUMNS: Array<{ id: BoardColumnId; labelKey: string; hintKey: strin
   { id: 'working', labelKey: 'sessions.board.working', hintKey: 'sessions.board.workingHint' },
   { id: 'idle', labelKey: 'sessions.board.idle', hintKey: 'sessions.board.idleHint' },
 ];
+
+// ── 看板视图（multica Issues 风格）────────────────────────────────────────────
+// 在状态板四列之外多一个「已关闭」列（multica 的 Done 位）；列固定顺序、横向滚动。
+type KanbanColumnId = BoardColumnId | 'closed';
+
+const KANBAN_COLUMNS: Array<{ id: KanbanColumnId; labelKey: string }> = [
+  { id: 'needs-you', labelKey: 'sessions.board.needsYou' },
+  { id: 'starting', labelKey: 'sessions.board.starting' },
+  { id: 'working', labelKey: 'sessions.board.working' },
+  { id: 'idle', labelKey: 'sessions.board.idle' },
+  { id: 'closed', labelKey: 'sessions.kanban.closed' },
+];
+
+// 已关闭会话可能积累上千条——看板里只展示最近的一截，剩余以计数提示。
+const KANBAN_CLOSED_CAP = 50;
+
+// multica 风格的列状态图标：14x14 SVG，圆环 + 不同填充度的扇形/对勾，
+// 颜色由列容器的 currentColor 决定（CSS 里按列着色）。
+function kanbanStatusIcon(id: KanbanColumnId): string {
+  const ring = (extra = '') =>
+    `<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="5.4" fill="none" stroke="currentColor" stroke-width="1.6"${extra}/>`;
+  switch (id) {
+    case 'starting': // 虚线圆环（multica Backlog 位）
+      return `${ring(' stroke-dasharray="1.6 2.1"')}</svg>`;
+    case 'working': // 半圆填充（multica In Progress 位）
+      return `${ring()}<path d="M7,7 L7,3.6 A3.4,3.4 0 0 1 7,10.4 Z" fill="currentColor"/></svg>`;
+    case 'needs-you': // 3/4 填充（multica In Review 位）
+      return `${ring()}<path d="M7,7 L7,3.6 A3.4,3.4 0 1 1 3.6,7 Z" fill="currentColor"/></svg>`;
+    case 'closed': // 实心圆 + 对勾（multica Done 位）
+      return `<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="7" cy="7" r="6.2" fill="currentColor"/><path d="M4.4 7.2 6.2 9 9.7 5.4" fill="none" stroke="var(--surface)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    case 'idle': // 空心圆环（multica Todo 位）
+    default:
+      return `${ring()}</svg>`;
+  }
+}
 
 function cssToken(value: unknown): string {
   return String(value ?? 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
@@ -170,6 +206,7 @@ function pageHtml(): string {
         <p>${t('sessions.subtitle')}</p>
       </div>
       <div class="segmented sessions-view-toggle" role="group" aria-label="${t('sessions.viewMode')}">
+        <button type="button" data-view="kanban">${t('sessions.viewKanban')}</button>
         <button type="button" data-view="board">${t('sessions.viewBoard')}</button>
         <button type="button" data-view="table">${t('sessions.viewTable')}</button>
       </div>
@@ -212,7 +249,9 @@ function pageHtml(): string {
       <tbody></tbody>
     </table>
     <div id="sessions-board" class="sessions-board" hidden></div>
+    <div id="sessions-kanban" class="sessions-kanban" hidden></div>
     <dialog id="drawer"></dialog>
+    <dialog id="term-modal" class="term-modal"></dialog>
   </section>`;
 }
 
@@ -228,7 +267,9 @@ export function renderSessionsPage(root: HTMLElement) {
   const bulkClearBtn = root.querySelector<HTMLButtonElement>('#bulk-clear')!;
   const table = root.querySelector<HTMLTableElement>('#sessions-table')!;
   const board = root.querySelector<HTMLElement>('#sessions-board')!;
-  const viewButtons = root.querySelectorAll<HTMLButtonElement>('[data-view]');
+  const kanban = root.querySelector<HTMLElement>('#sessions-kanban')!;
+  const termModal = root.querySelector<HTMLDialogElement>('#term-modal')!;
+  const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
 
   const selected = new Set<string>();
   let sortKey = 'lastMessageAt';
@@ -241,6 +282,7 @@ export function renderSessionsPage(root: HTMLElement) {
   // 入场动画是否已播过（只在首次渲染播一轮）。
   let lastBoardHtml = '';
   let lastTableHtml = '';
+  let lastKanbanHtml = '';
   let boardAnimated = false;
 
   function orderedBoardColumns() {
@@ -398,6 +440,112 @@ export function renderSessionsPage(root: HTMLElement) {
     boardAnimated = true;
   }
 
+  // ── 看板视图（multica Issues 风格卡片）────────────────────────────────────
+  // 卡片整体即点击目标：点开页面内终端弹窗；右上角「详情」进抽屉。
+  function kanbanCardHtml(s: any): string {
+    const title = stripMentionPrefix(s.title) || s.sessionId;
+    const botName = botDisplayName(s);
+    const chatTitle = chatDisplayTitle(s);
+    const repo = repoBasename(s.workingDir);
+    const signal = boardSignalLabel(s);
+    const desc = [chatTitle, repo !== '-' ? repo : null].filter(Boolean).join(' · ');
+    return `<article class="kanban-card" data-id="${escapeHtml(s.sessionId)}" tabindex="0" role="button">
+      <div class="kanban-card-top">
+        <span class="badge cli-${cssToken(s.cliId)}">${escapeHtml(s.cliId ?? 'unknown')}</span>
+        <span class="kanban-card-id" title="${escapeHtml(s.sessionId)}">#${escapeHtml(String(s.sessionId).slice(0, 8))}</span>
+        ${s.adopt ? '<span class="badge">adopt</span>' : ''}
+        <button type="button" class="card-act kanban-card-details" data-action="details" title="${escapeHtml(t('sessions.details'))}" aria-label="${escapeHtml(t('sessions.details'))}">${ICON.details}</button>
+      </div>
+      <p class="kanban-card-title" title="${escapeHtml(String(s.title ?? title))}">${escapeHtml(String(title).slice(0, 140))}</p>
+      ${desc ? `<p class="kanban-card-desc" title="${escapeHtml(desc)}">${escapeHtml(desc)}</p>` : ''}
+      ${signal ? `<div class="session-signal" title="${escapeHtml(signal)}">${escapeHtml(signal)}</div>` : ''}
+      <div class="kanban-card-foot">
+        <span class="kanban-card-owner">${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}<span>${escapeHtml(botName)}</span></span>
+        <span class="kanban-card-updated">${escapeHtml(t('sessions.kanban.updated', { time: relTime(s.lastMessageAt) }))}</span>
+      </div>
+    </article>`;
+  }
+
+  function renderKanban(rows: any[]): void {
+    const groups = new Map<KanbanColumnId, any[]>(KANBAN_COLUMNS.map(c => [c.id, []]));
+    for (const row of rows) {
+      const column: KanbanColumnId | null = row.status === 'closed' ? 'closed' : deriveSessionBoardColumn(row);
+      if (column) groups.get(column)!.push(row);
+    }
+    const html = KANBAN_COLUMNS.map(column => {
+      let columnRows = groups.get(column.id) ?? [];
+      let hiddenCount = 0;
+      if (column.id === 'closed') {
+        columnRows.sort((a, b) =>
+          Number(b.closedAt ?? b.lastMessageAt ?? 0) - Number(a.closedAt ?? a.lastMessageAt ?? 0));
+        if (columnRows.length > KANBAN_CLOSED_CAP) {
+          hiddenCount = columnRows.length - KANBAN_CLOSED_CAP;
+          columnRows = columnRows.slice(0, KANBAN_CLOSED_CAP);
+        }
+      } else {
+        columnRows.sort((a, b) => compareBoardRows(a, b, column.id as BoardColumnId));
+      }
+      return `<section class="kanban-column kanban-${column.id}" data-col="${column.id}">
+        <header>
+          <span class="kanban-col-icon">${kanbanStatusIcon(column.id)}</span>
+          <h2>${escapeHtml(t(column.labelKey))}</h2>
+          <span class="kanban-col-count">${columnRows.length + hiddenCount}</span>
+        </header>
+        <div class="kanban-col-list">
+          ${columnRows.length ? columnRows.map(kanbanCardHtml).join('') : `<div class="kanban-col-empty">${t('sessions.board.emptyColumn')}</div>`}
+          ${hiddenCount ? `<div class="kanban-col-more">${escapeHtml(t('sessions.kanban.moreClosed', { count: hiddenCount }))}</div>` : ''}
+        </div>
+      </section>`;
+    }).join('');
+    if (html === lastKanbanHtml) return;
+    lastKanbanHtml = html;
+    kanban.innerHTML = html;
+  }
+
+  // 页面内终端弹窗：默认嵌只读终端；已认证用户先 mint 可写链接（弹窗里能直接
+  // 打字），拿不到再回退只读。没有 web 终端（挂起/已关闭）时退回详情抽屉。
+  async function openTerminalModal(s: any): Promise<void> {
+    const readonlyUrl = terminalHref(s);
+    if (!readonlyUrl) {
+      openDrawer(s);
+      return;
+    }
+    const title = stripMentionPrefix(s.title) || s.sessionId;
+    const feishu = s.feishuChatLink
+      ? `<a class="card-act" href="${escapeHtml(s.feishuChatLink)}" target="_blank" rel="noopener" title="${escapeHtml(t('sessions.kanban.openFeishu'))}" aria-label="${escapeHtml(t('sessions.kanban.openFeishu'))}">${ICON.openChat}</a>`
+      : '';
+    termModal.innerHTML = `<div class="term-modal-head">
+        <span class="term-modal-title">
+          ${botAvatarHtml({ name: botDisplayName(s), larkAppId: s.larkAppId, size: 'sm' })}
+          <strong title="${escapeHtml(String(s.title ?? title))}">${escapeHtml(String(title).slice(0, 60))}</strong>
+          <span class="status status-${escapeHtml(s.status ?? 'unknown')}">${escapeHtml(s.status ?? 'unknown')}</span>
+        </span>
+        <span class="term-modal-actions">
+          ${feishu}
+          <a id="term-modal-tab" class="card-act" href="${escapeHtml(readonlyUrl)}" target="_blank" rel="noopener" title="${escapeHtml(t('sessions.kanban.openTab'))}" aria-label="${escapeHtml(t('sessions.kanban.openTab'))}">${ICON.terminal}</a>
+          <button type="button" id="term-modal-close" class="card-act" title="${escapeHtml(t('sessions.dismiss'))}" aria-label="${escapeHtml(t('sessions.dismiss'))}">${ICON.close}</button>
+        </span>
+      </div>
+      <div class="term-modal-body"><div class="term-modal-loading">${t('sessions.kanban.terminalLoading')}</div></div>`;
+    termModal.showModal();
+    termModal.querySelector<HTMLButtonElement>('#term-modal-close')!.onclick = () => termModal.close();
+    let url = readonlyUrl;
+    if (ui.authed) {
+      try {
+        const r = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/write-link`);
+        const body = await r.json().catch(() => ({}));
+        if (r.ok && body?.ok !== false && body?.url) url = body.url;
+      } catch {
+        // 可写链接拿不到就用只读链接，弹窗仍可观看
+      }
+    }
+    if (!termModal.open) return; // 加载期间用户已关掉弹窗
+    const bodyEl = termModal.querySelector<HTMLElement>('.term-modal-body')!;
+    bodyEl.innerHTML = `<iframe class="term-modal-frame" src="${escapeHtml(url)}" allow="clipboard-read; clipboard-write"></iframe>`;
+    const tab = termModal.querySelector<HTMLAnchorElement>('#term-modal-tab');
+    if (tab) tab.href = url;
+  }
+
   function filtered(): any[] {
     const f = new FormData(filtersForm);
     const q = ((f.get('q') as string) ?? '').toLowerCase();
@@ -406,11 +554,14 @@ export function renderSessionsPage(root: HTMLElement) {
     const status = f.get('status') as string;
     const adopt = f.get('adopt') as string;
     const active = !!f.get('active');
+    // 看板视图自带「已关闭」列，闭会话由列本身收纳——「仅活跃」开关不再把它们
+    // 整体滤掉，否则 Done 位永远是空的。
+    const keepClosed = viewMode === 'kanban';
     const rows = [...store.sessions.values()]
       .filter(s => !cliFilterActive || cli.includes(s.cliId ?? 'unknown'))
       .filter(s => !status || s.status === status)
       .filter(s => !adopt || (adopt === 'yes') === !!s.adopt)
-      .filter(s => !active || s.status !== 'closed')
+      .filter(s => !active || keepClosed || s.status !== 'closed')
       .filter(s => !q || JSON.stringify(s).toLowerCase().includes(q));
     rows.sort(compareRows);
     return rows;
@@ -486,9 +637,10 @@ export function renderSessionsPage(root: HTMLElement) {
       if (!s || s.status === 'closed') selected.delete(sid);
     }
     const boardRows = rows.filter(r => r.status !== 'closed');
-    const visibleRows = viewMode === 'board' ? boardRows : rows;
+    const visibleRows = viewMode === 'table' ? rows : boardRows;
     table.hidden = viewMode !== 'table';
     board.hidden = viewMode !== 'board';
+    kanban.hidden = viewMode !== 'kanban';
     if (viewMode === 'table') {
       const tableHtml = rows.length
         ? rows.map(rowHtml).join('')
@@ -497,6 +649,8 @@ export function renderSessionsPage(root: HTMLElement) {
         lastTableHtml = tableHtml;
         tbody.innerHTML = tableHtml;
       }
+    } else if (viewMode === 'kanban') {
+      renderKanban(rows);
     } else {
       renderBoard(boardRows);
     }
@@ -776,12 +930,45 @@ export function renderSessionsPage(root: HTMLElement) {
 
   viewButtons.forEach(btn => {
     btn.addEventListener('click', () => {
-      const next = btn.dataset.view === 'table' ? 'table' : 'board';
+      const next = normalizeSessionsViewMode(btn.dataset.view) ?? 'board';
       if (next === viewMode) return;
       viewMode = next;
       writeStoredSessionsViewMode(window.localStorage, viewMode);
       rerender();
     });
+  });
+
+  // ── 看板交互：卡片即终端入口，「详情」按钮进抽屉 ─────────────────────────
+  kanban.addEventListener('click', e => {
+    const target = e.target as HTMLElement;
+    const card = target.closest<HTMLElement>('.kanban-card[data-id]');
+    if (!card) return;
+    const s = store.sessions.get(card.dataset.id!);
+    if (!s) return;
+    const actionButton = target.closest<HTMLButtonElement>('button[data-action]');
+    if (actionButton) {
+      if (actionButton.dataset.action === 'details') openDrawer(s);
+      return;
+    }
+    if (target.closest('a, button, input, label')) return;
+    void openTerminalModal(s);
+  });
+
+  kanban.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const target = e.target as HTMLElement;
+    if (!target.classList?.contains('kanban-card')) return;
+    e.preventDefault();
+    const s = store.sessions.get(target.dataset.id!);
+    if (s) void openTerminalModal(s);
+  });
+
+  // 点弹窗 backdrop 关闭；关闭时清空内容，立刻断开 iframe 里的终端 WebSocket。
+  termModal.addEventListener('click', e => {
+    if (e.target === termModal) termModal.close();
+  });
+  termModal.addEventListener('close', () => {
+    termModal.innerHTML = '';
   });
 
   selectAllBox.addEventListener('change', () => {
