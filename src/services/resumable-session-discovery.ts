@@ -94,8 +94,15 @@ interface FileEntry { path: string; mtimeMs: number; }
 
 /** Recursively collect `*.jsonl` files under `root`, returning the most-recently
  *  modified `limit` of them. Bounded depth so a pathological tree can't wedge
- *  the scan. */
-async function collectRecentJsonl(root: string, limit: number, maxDepth = 4): Promise<FileEntry[]> {
+ *  the scan. `excludeBasenames` drops files whose name (sans `.jsonl`) is in the
+ *  set BEFORE the limit slice — used by claude-family, where the filename IS the
+ *  session id, so live sessions are skipped without ever being parsed. */
+async function collectRecentJsonl(
+  root: string,
+  limit: number,
+  maxDepth = 4,
+  excludeBasenames?: ReadonlySet<string>,
+): Promise<FileEntry[]> {
   const out: FileEntry[] = [];
   async function walk(dir: string, depth: number): Promise<void> {
     if (depth > maxDepth) return;
@@ -110,6 +117,7 @@ async function collectRecentJsonl(root: string, limit: number, maxDepth = 4): Pr
       if (d.isDirectory()) {
         await walk(full, depth + 1);
       } else if (d.isFile() && d.name.endsWith('.jsonl')) {
+        if (excludeBasenames?.has(d.name.slice(0, -'.jsonl'.length))) return;
         try {
           const st = await fs.stat(full);
           out.push({ path: full, mtimeMs: st.mtimeMs });
@@ -166,9 +174,15 @@ function extractClaudeUserText(message: unknown): string | null {
   return unwrapBotmuxPrompt(trimmed);
 }
 
-export async function discoverClaudeFamilySessions(dataDir: string, limit: number): Promise<ResumableSession[]> {
+export async function discoverClaudeFamilySessions(
+  dataDir: string,
+  limit: number,
+  exclude?: ReadonlySet<string>,
+): Promise<ResumableSession[]> {
   const projectsRoot = join(dataDir, 'projects');
-  const files = await collectRecentJsonl(projectsRoot, limit * 3, 2);
+  // The jsonl filename IS the session id, so excluded (live) sessions are
+  // dropped here — before any file is parsed — and never count against `limit`.
+  const files = await collectRecentJsonl(projectsRoot, limit * 3, 2, exclude);
   const parsed = await Promise.all(files.map((f) => parseClaudeTranscript(f.path, f.mtimeMs)));
   return parsed.filter((s): s is ResumableSession => s !== null).slice(0, limit);
 }
@@ -180,29 +194,52 @@ export async function discoverClaudeFamilySessions(dataDir: string, limit: numbe
  *  `response_item` role:user entries include the synthetic
  *  <environment_context>/<permissions> preamble, so we prefer user_message).
  *  Streamed line by line, stopping once id + cwd + title are found. */
-async function parseRolloutTranscript(path: string, mtimeMs: number): Promise<ResumableSession | null> {
+async function parseRolloutTranscript(
+  path: string,
+  mtimeMs: number,
+  exclude?: ReadonlySet<string>,
+): Promise<ResumableSession | null> {
   // Accumulate into an object — closure mutation of plain `let` defeats TS's
   // control-flow narrowing at the post-loop guard; object properties keep their
   // declared type.
   const acc: { id: string | null; cwd: string | null; title: string } = { id: null, cwd: null, title: '' };
+  let excluded = false;
   await forEachJsonLine(path, (rec) => {
     const payload = asRecord(rec.payload);
     if (rec.type === 'session_meta' && payload) {
-      if (typeof payload.id === 'string') acc.id = payload.id;
+      if (typeof payload.id === 'string') {
+        acc.id = payload.id;
+        // The resume id lives on the very first line; bail immediately on a
+        // live session so excluded rollouts cost a single line read.
+        if (exclude?.has(payload.id)) { excluded = true; return true; }
+      }
       if (typeof payload.cwd === 'string') acc.cwd = payload.cwd;
     } else if (!acc.title && rec.type === 'event_msg' && payload?.type === 'user_message') {
       if (typeof payload.message === 'string') acc.title = truncateTitle(unwrapBotmuxPrompt(payload.message));
     }
     return Boolean(acc.id && acc.cwd && acc.title);
   });
-  if (!acc.id || !acc.cwd) return null;
+  if (excluded || !acc.id || !acc.cwd) return null;
   return { cliSessionId: acc.id, cwd: acc.cwd, title: acc.title || `Session ${acc.id.slice(0, 8)}`, lastActivityAt: mtimeMs };
 }
 
-export async function discoverRolloutSessions(sessionsRoot: string, limit: number): Promise<ResumableSession[]> {
-  const files = await collectRecentJsonl(sessionsRoot, limit * 3, 5);
-  const parsed = await Promise.all(files.map((f) => parseRolloutTranscript(f.path, f.mtimeMs)));
-  return parsed.filter((s): s is ResumableSession => s !== null).slice(0, limit);
+export async function discoverRolloutSessions(
+  sessionsRoot: string,
+  limit: number,
+  exclude?: ReadonlySet<string>,
+): Promise<ResumableSession[]> {
+  // The resume id is inside the file (not the filename), so we can't pre-filter
+  // by name. Instead walk most-recent-first and parse until `limit` non-excluded
+  // sessions are collected — excluded ones cost only a first-line read, so a
+  // host with many live sessions doesn't starve the picker.
+  const files = await collectRecentJsonl(sessionsRoot, Number.MAX_SAFE_INTEGER, 5);
+  const out: ResumableSession[] = [];
+  for (const f of files) {
+    if (out.length >= limit) break;
+    const s = await parseRolloutTranscript(f.path, f.mtimeMs, exclude);
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 // ─── Antigravity flat history log (antigravity) ──────────────────────────────
@@ -214,7 +251,11 @@ export async function discoverRolloutSessions(sessionsRoot: string, limit: numbe
  *  would hide recent sessions once the file grows. Dedup by conversationId,
  *  keeping the latest timestamp; the first display seen for a conversation is
  *  its title. */
-export async function discoverAntigravitySessions(historyPath: string, limit: number): Promise<ResumableSession[]> {
+export async function discoverAntigravitySessions(
+  historyPath: string,
+  limit: number,
+  exclude?: ReadonlySet<string>,
+): Promise<ResumableSession[]> {
   const byConversation = new Map<string, ResumableSession>();
   // Read the full log (high line cap, no byte prefix) so tail entries are seen.
   await forEachJsonLine(historyPath, (rec) => {
@@ -236,6 +277,7 @@ export async function discoverAntigravitySessions(historyPath: string, limit: nu
     }
   }, 1_000_000);
   return [...byConversation.values()]
+    .filter((s) => !exclude?.has(s.cliSessionId))
     .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
     .slice(0, limit);
 }

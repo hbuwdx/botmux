@@ -174,8 +174,8 @@ export function createAntigravityAdapter(pathOverride?: string): CliAdapter {
     /** Import path: the submit log `~/.gemini/antigravity-cli/history.jsonl`
      *  records `{display, timestamp, workspace, conversationId}` per submit —
      *  enough to discover resumable conversations (deduped by conversationId). */
-    listResumableSessions({ limit }) {
-      return discoverAntigravitySessions(HISTORY_PATH, limit);
+    listResumableSessions({ limit, exclude }) {
+      return discoverAntigravitySessions(HISTORY_PATH, limit, exclude);
     },
 
     async writeInput(pty: PtyHandle, content: string) {

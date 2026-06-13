@@ -2501,14 +2501,20 @@ export async function discoverResumableSessionsForBot(
   let adapter: ReturnType<typeof createCliAdapterSync>;
   try { adapter = createCliAdapterSync(cliId, cliPathOverride); } catch { return []; }
   if (!adapter.listResumableSessions) return [];
-  let found: ResumableSession[];
-  try { found = await adapter.listResumableSessions({ limit }); } catch { return []; }
-  const live = new Set<string>();
+  // Exclude sessions botmux already runs live. Passed INTO the adapter so the
+  // exclusion happens before the `limit` truncation — otherwise a host with
+  // many live sessions (the most-recently-active transcripts) would see the
+  // whole top-`limit` filtered away, leaving the picker nearly empty.
+  const exclude = new Set<string>();
   for (const ds of activeSessions.values()) {
     const sid = ds.session.cliSessionId;
-    if (sid) live.add(sid);
+    if (sid) exclude.add(sid);
   }
-  return found.filter((s) => !live.has(s.cliSessionId));
+  try {
+    return await adapter.listResumableSessions({ limit, exclude });
+  } catch {
+    return [];
+  }
 }
 
 /** Import (resume) a stored session into the current topic: re-spawn the bot's

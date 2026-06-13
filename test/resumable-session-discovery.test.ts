@@ -76,6 +76,22 @@ describe('discoverClaudeFamilySessions', () => {
     expect(await discoverClaudeFamilySessions(join(dataDir, 'nope'), 10)).toEqual([]);
   });
 
+  // Regression: a host with many live sessions must not starve the picker. The
+  // `exclude` set (currently-live cliSessionIds) is applied BEFORE the limit
+  // slice, so excluded sessions never crowd out resumable ones.
+  it('excludes live session ids before the limit slice (no starvation)', async () => {
+    for (let i = 0; i < 6; i++) {
+      writeSession('-root-p', `live-or-not-${i}`, [
+        { type: 'user', cwd: '/root/p', message: { role: 'user', content: `session ${i}` } },
+      ]);
+    }
+    // Exclude 4 of the 6; asking for 2 must still return 2 (the non-excluded).
+    const exclude = new Set(['live-or-not-0', 'live-or-not-1', 'live-or-not-2', 'live-or-not-3']);
+    const out = await discoverClaudeFamilySessions(dataDir, 2, exclude);
+    expect(out).toHaveLength(2);
+    expect(out.every((s) => !exclude.has(s.cliSessionId))).toBe(true);
+  });
+
   // Regression (Codex blocker 2): a first user record larger than any fixed
   // read-prefix must NOT be truncated mid-line and dropped — streaming reads
   // the complete line so cwd is still recovered.
@@ -125,6 +141,19 @@ describe('discoverRolloutSessions (codex / traex)', () => {
     ]);
     const out = await discoverRolloutSessions(sessionsRoot, 10);
     expect(out[0]?.title).toBe('actual prompt');
+  });
+
+  it('excludes live rollout ids and keeps collecting until limit is met', async () => {
+    for (let i = 0; i < 5; i++) {
+      writeRollout(`2026/06/${10 + i}`, `rollout-${i}.jsonl`, [
+        { type: 'session_meta', payload: { id: `roll-${i}`, cwd: `/root/r${i}` } },
+        { type: 'event_msg', payload: { type: 'user_message', message: `prompt ${i}` } },
+      ]);
+    }
+    const exclude = new Set(['roll-4', 'roll-3', 'roll-2']); // newest 3 are "live"
+    const out = await discoverRolloutSessions(sessionsRoot, 2, exclude);
+    expect(out).toHaveLength(2);
+    expect(out.every((s) => !exclude.has(s.cliSessionId))).toBe(true);
   });
 
   it('drops rollouts missing session_meta id/cwd', async () => {

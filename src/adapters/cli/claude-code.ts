@@ -484,8 +484,8 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     /** Import path: scan this variant's data root (`<dataDir>/projects/<hash>/<id>.jsonl`)
      *  for resumable sessions. The session id is the jsonl basename; cwd + first
      *  prompt come from the transcript. */
-    listResumableSessions({ limit }) {
-      return discoverClaudeFamilySessions(variant.dataDir, limit);
+    listResumableSessions({ limit, exclude }) {
+      return discoverClaudeFamilySessions(variant.dataDir, limit, exclude);
     },
 
     buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, locale, model, disableCliBypass }) {

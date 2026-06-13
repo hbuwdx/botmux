@@ -277,7 +277,14 @@ export interface CliAdapter {
    *  pure filesystem (no PTY / subprocess), most-recent first, capped to `limit`.
    *  undefined = this CLI has no discoverable per-session store (resume only via
    *  botmux's own id, an opaque store, or no per-session resume at all). */
-  listResumableSessions?(opts: { limit: number }): Promise<ResumableSession[]>;
+  listResumableSessions?(opts: {
+    limit: number;
+    /** CLI-native session ids to skip (sessions botmux already runs live). Applied
+     *  BEFORE truncating to `limit` — and, where the id is the on-disk filename
+     *  (claude-family), before parsing — so a host with many live sessions still
+     *  surfaces `limit` resumable ones instead of being starved by exclusion. */
+    exclude?: ReadonlySet<string>;
+  }): Promise<ResumableSession[]>;
 
   /** Optional CLI version command override. Defaults to `[resolvedBin, '--version']`. */
   versionCommand?(): { bin: string; args: string[] };

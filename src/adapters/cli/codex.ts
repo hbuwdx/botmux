@@ -159,8 +159,8 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
 
     /** Import path: scan the rollout files under `<CODEX_HOME>/sessions` for
      *  resumable sessions (session_meta carries the resume id + cwd). */
-    listResumableSessions({ limit }) {
-      return discoverRolloutSessions(codexSessionsRoot(), limit);
+    listResumableSessions({ limit, exclude }) {
+      return discoverRolloutSessions(codexSessionsRoot(), limit, exclude);
     },
 
     async writeInput(pty: PtyHandle, content: string) {

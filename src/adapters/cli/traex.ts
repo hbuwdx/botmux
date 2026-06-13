@@ -173,8 +173,8 @@ export function createTraexAdapter(pathOverride?: string): CliAdapter {
 
     /** Import path: TRAE writes Codex-shaped rollout files under
      *  `<TRAE_HOME>/cli/sessions` — same parser as Codex. */
-    listResumableSessions({ limit }) {
-      return discoverRolloutSessions(traeSessionsRoot(), limit);
+    listResumableSessions({ limit, exclude }) {
+      return discoverRolloutSessions(traeSessionsRoot(), limit, exclude);
     },
 
     async writeInput(pty: PtyHandle, content: string) {
