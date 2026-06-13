@@ -1,5 +1,5 @@
 import type { ProjectInfo } from '../../services/project-scanner.js';
-import type { CliId } from '../../adapters/cli/types.js';
+import type { CliId, ResumableSession } from '../../adapters/cli/types.js';
 import { adoptTargetKey, adoptTargetLabel, type AdoptableSession } from '../../core/session-discovery.js';
 import type { ZellijAdoptableSession } from '../../core/zellij-adopt-discovery.js';
 import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js';
@@ -1650,6 +1650,7 @@ export function buildAdoptSelectCard(
   sessions: Array<AdoptableSession | ZellijAdoptableSession>,
   rootMessageId?: string,
   locale?: Locale,
+  resumable?: ResumableSession[],
 ): string {
   const unknownUptime = t('card.adopt.uptime_unknown', undefined, locale);
   const options = sessions.map((s) => {
@@ -1667,25 +1668,65 @@ export function buildAdoptSelectCard(
     };
   });
 
+  // Second filter: sessions resumable from disk (paseo-style import). Picking
+  // one re-spawns the CLI via `--resume <id>` in its recorded cwd — no live
+  // pane required.
+  const resumeOptions = (resumable ?? []).map((r) => {
+    const project = compactPlainText(r.cwd.split('/').pop() || r.cwd, 18);
+    const title = compactPlainText(r.title || r.cliSessionId.slice(0, 8), 40);
+    const when = formatThreadUpdatedAt(r.lastActivityAt || undefined, locale);
+    return {
+      text: { tag: 'plain_text' as const, content: `${title} · ${project} · ${when}` },
+      value: JSON.stringify({ cliSessionId: r.cliSessionId, cwd: r.cwd }),
+    };
+  });
+
+  const elements: any[] = [
+    {
+      tag: 'div',
+      text: { tag: 'lark_md', content: t('card.adopt.section_live', undefined, locale) },
+    },
+    {
+      tag: 'action',
+      actions: [
+        {
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: t('card.adopt.placeholder_select', undefined, locale) },
+          options,
+          value: { key: 'adopt_select', root_id: rootMessageId ?? '' },
+        },
+      ],
+    },
+  ];
+
+  if (resumeOptions.length > 0) {
+    elements.push(
+      { tag: 'hr' },
+      {
+        tag: 'div',
+        text: { tag: 'lark_md', content: t('card.adopt.section_resume', undefined, locale) },
+      },
+      {
+        tag: 'action',
+        actions: [
+          {
+            tag: 'select_static',
+            placeholder: { tag: 'plain_text', content: t('card.adopt.placeholder_resume', undefined, locale) },
+            options: resumeOptions,
+            value: { key: 'adopt_resume_select', root_id: rootMessageId ?? '' },
+          },
+        ],
+      },
+    );
+  }
+
   const card = {
     config: { wide_screen_mode: true },
     header: {
       template: 'blue',
       title: { tag: 'plain_text', content: t('card.adopt.title', undefined, locale) },
     },
-    elements: [
-      {
-        tag: 'action',
-        actions: [
-          {
-            tag: 'select_static',
-            placeholder: { tag: 'plain_text', content: t('card.adopt.placeholder_select', undefined, locale) },
-            options,
-            value: { key: 'adopt_select', root_id: rootMessageId ?? '' },
-          },
-        ],
-      },
-    ],
+    elements,
   };
   return JSON.stringify(card);
 }

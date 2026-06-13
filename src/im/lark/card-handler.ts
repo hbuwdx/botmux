@@ -1468,6 +1468,42 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     return;
   }
 
+  // Second adopt filter: resume a session discovered on disk (paseo-style
+  // import). Re-spawns the bot's CLI via `--resume <id>` in the recorded cwd.
+  if (action?.value?.key === 'adopt_resume_select' && option) {
+    const rootId = action?.value?.root_id;
+    if (!rootId) return;
+
+    const sKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
+    const ds = activeSessions.get(sKey);
+    if (!ds) return;
+
+    if (!canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
+      logger.info(`adopt_resume_select blocked for non-operator user: ${operatorOpenId} (chat=${ds.chatId})`);
+      return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(ds.larkAppId)) } };
+    }
+
+    let selected: { cliSessionId?: string; cwd?: string };
+    try { selected = JSON.parse(option); } catch { return; }
+    if (!selected.cliSessionId) return;
+
+    // Re-discover from disk to validate the session still exists (and is not
+    // already live in another botmux session) before committing to the resume.
+    const botCfg = getBot(ds.larkAppId).config;
+    const { discoverResumableSessionsForBot, startResumeImportSession } = await import('../../core/command-handler.js');
+    const resumable = await discoverResumableSessionsForBot(botCfg.cliId, botCfg.cliPathOverride, activeSessions);
+    const target = resumable.find(r => r.cliSessionId === selected.cliSessionId);
+    if (!target) {
+      await sessionReply(rootId, t('cmd.adopt.resume_not_found', { id: selected.cliSessionId }, localeForBot(ds.larkAppId)));
+      if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+      return;
+    }
+
+    await startResumeImportSession(target, ds, { activeSessions, sessionReply: deps.sessionReply, getActiveCount: () => 0, lastRepoScan }, larkAppId);
+    if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+    return;
+  }
+
   // Handle repo select card (option-based dropdowns: plain switch, or
   // `repo_worktree` = create a worktree from the picked repo and open that).
   const isWorktreeOpen = action?.value?.key === 'repo_worktree';

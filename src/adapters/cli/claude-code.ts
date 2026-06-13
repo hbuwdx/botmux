@@ -7,6 +7,7 @@ import type { CliAdapter, CliId, PtyHandle } from './types.js';
 import { findJsonlContainingFingerprint, jsonlContainsFingerprint, normaliseForFingerprint } from '../../services/claude-transcript.js';
 import { t } from '../../i18n/index.js';
 import { delay, scaleMs } from '../../utils/timing.js';
+import { discoverClaudeFamilySessions } from '../../services/resumable-session-discovery.js';
 
 /** Resolve cwd to its canonical (symlink-free) absolute path for project-hash
  *  computation. Claude Code itself runs `process.cwd()` which the kernel returns
@@ -478,6 +479,13 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
       // observed CLI-native id (rotation can happen mid-run); fall back to the
       // botmux sessionId for the first-turn case where they coincide.
       return `${variant.resumeBin} --resume ${cliSessionId ?? sessionId}`;
+    },
+
+    /** Import path: scan this variant's data root (`<dataDir>/projects/<hash>/<id>.jsonl`)
+     *  for resumable sessions. The session id is the jsonl basename; cwd + first
+     *  prompt come from the transcript. */
+    listResumableSessions({ limit, exclude }) {
+      return discoverClaudeFamilySessions(variant.dataDir, limit, exclude);
     },
 
     buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, locale, model, disableCliBypass }) {
