@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { findLaunchedCliPid } from '../src/core/session-discovery.js';
+import { findLaunchedCliPid, launcherRetryStillValid } from '../src/core/session-discovery.js';
 
 // findLaunchedCliPid sees through a wrapperCli launcher (`aiden x claude`) to the
 // real CLI process it forks. The OS-probing is injected so the BFS is tested
@@ -53,5 +53,34 @@ describe('findLaunchedCliPid()', () => {
     const cyc: Record<number, number[]> = { 1: [2], 2: [1] }; // 2 points back to 1
     const c: Record<number, string> = { 1: 'node', 2: 'sh' };
     expect(findLaunchedCliPid(1, 'claude-code', 6, { childrenOf: (pid) => cyc[pid] ?? [], commOf: (pid) => c[pid] })).toBeNull();
+  });
+});
+
+// Regression guard for Codex's blocker: a retry tick that started for one spawn
+// must not apply its result after a worker restart replaced the backend.
+describe('launcherRetryStillValid()', () => {
+  const backendA = { id: 'A' };
+  const backendB = { id: 'B' };
+
+  it('valid when same backend instance still reports the captured launcher pid', () => {
+    expect(launcherRetryStillValid(backendA, backendA, 100, 100)).toBe(true);
+  });
+
+  it('invalid after a respawn replaced the backend instance (the blocker)', () => {
+    // Old timer fires; global `backend` is now backendB (new spawn). Must NOT
+    // write the new session's cliPid/bridgeCliPid from the old launcher tree.
+    expect(launcherRetryStillValid(backendB, backendA, 100, 100)).toBe(false);
+  });
+
+  it('invalid when the backend was torn down (null) and not yet respawned', () => {
+    expect(launcherRetryStillValid(null, backendA, undefined, 100)).toBe(false);
+  });
+
+  it('invalid when the same backend now reports a different child pid (pane-child change / pid reuse)', () => {
+    expect(launcherRetryStillValid(backendA, backendA, 999, 100)).toBe(false);
+  });
+
+  it('invalid when getChildPid is unavailable', () => {
+    expect(launcherRetryStillValid(backendA, backendA, null, 100)).toBe(false);
   });
 });

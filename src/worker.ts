@@ -58,7 +58,7 @@ import {
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch } from './setup/cli-selection.js';
-import { findLaunchedCliPid } from './core/session-discovery.js';
+import { findLaunchedCliPid, launcherRetryStillValid } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
@@ -3901,9 +3901,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   if (cliPid && cfg.wrapperCli && cfg.wrapperCli.trim() && !sandboxOn) {
     const launcherPid = cliPid;
     const targetCliId = cfg.cliId as CliId;
+    // Pin this spawn's backend instance so a worker restart during the retry
+    // window (which replaces `backend` + forks a new launcher) aborts the stale
+    // timer instead of writing the new session's cliPid/bridgeCliPid from the
+    // old launcher tree. See launcherRetryStillValid.
+    const backendAtSpawn = backend;
     let attempts = 0;
     const resolveRealCliPid = () => {
-      if (!backend) return;
+      if (!launcherRetryStillValid(backend, backendAtSpawn, backend?.getChildPid?.(), launcherPid)) return;
       const realPid = findLaunchedCliPid(launcherPid, targetCliId);
       if (realPid && realPid !== launcherPid) {
         log(`wrapperCli "${cfg.wrapperCli}": resolved real CLI pid ${realPid} under launcher ${launcherPid} (cliId=${targetCliId}); rewiring session discovery + bridge`);

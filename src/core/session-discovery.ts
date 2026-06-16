@@ -366,6 +366,31 @@ export function findLaunchedCliPid(
 }
 
 /**
+ * Guard for the async wrapperCli pid-resolver retry. The retry closure starts
+ * for ONE spawn and captures that spawn's `backendAtSpawn` instance + the
+ * launcher pid it observed. A worker restart (CLI crash → in-worker respawn)
+ * during the ~6s retry window tears down the backend and forks a NEW launcher,
+ * so a stale tick must NOT apply its result — doing so would overwrite the NEW
+ * session's `backend.cliPid` / global `bridgeCliPid` with a pid resolved from
+ * the OLD launcher tree, mis-pointing the new session's bridge + discovery.
+ *
+ * A tick may apply only when (a) the backend instance is still the very one the
+ * retry was scheduled for (respawn replaces it: `backend = null` then a fresh
+ * object), and (b) that backend's current child pid is still the captured
+ * launcher pid (defends against a same-instance pane-child change / pid reuse).
+ */
+export function launcherRetryStillValid(
+  currentBackend: unknown,
+  backendAtSpawn: unknown,
+  currentChildPid: number | null | undefined,
+  launcherPid: number,
+): boolean {
+  if (!currentBackend) return false;
+  if (currentBackend !== backendAtSpawn) return false;
+  return currentChildPid === launcherPid;
+}
+
+/**
  * Try to read Claude Code session metadata from ~/.claude/sessions/<PID>.json.
  * Returns { sessionId, cwd, startedAt } or undefined.
  */
