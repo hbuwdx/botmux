@@ -93,6 +93,13 @@ vi.mock('../src/services/git-worktree.js', () => ({
   createRepoWorktree: vi.fn(),
 }));
 
+vi.mock('../src/services/worktree-slug-ai.js', () => ({
+  worktreeSlugFromContextAI: vi.fn(async (title?: string, firstPrompt?: string) => {
+    const text = title?.trim() || firstPrompt?.trim();
+    return text?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }),
+}));
+
 vi.mock('@larksuiteoapi/node-sdk', () => ({
   Client: class { constructor() {} },
   WSClient: class { start() {} },
@@ -256,6 +263,7 @@ describe('repo select card — worktree open', () => {
     const second = await handleCardAction(makeSelectEvent('repo_worktree', '/repos/alpha'), deps, APP_ID);
 
     expect(createRepoWorktree).toHaveBeenCalledTimes(1);
+    expect(createRepoWorktree).toHaveBeenCalledWith('/repos/alpha', { slug: 'repo-test' });
     expect(first?.toast?.content).toContain('正在创建');
     expect(second?.toast?.content).toContain('已有一个 worktree 正在创建');
     expect(ds.worktreeCreating).toBe(true);

@@ -12,7 +12,8 @@ import { mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { createRepoWorktree } from '../src/services/git-worktree.js';
+import { createRepoWorktree, slugFromWorktreeText } from '../src/services/git-worktree.js';
+import { localWorktreeSlugFromContext } from '../src/services/worktree-slug-ai.js';
 
 let tempRoot: string;
 
@@ -89,6 +90,32 @@ describe('createRepoWorktree', () => {
     expect(first.branch).toBe('wt/1');
     expect(second.branch).toBe('wt/2');
     expect(second.path).toBe(join(tempRoot, 'proj-wt-2'));
+  });
+
+  it('uses a semantic slug for auto-named worktrees and increments on collisions', async () => {
+    const upstream = makeUpstream('upstream');
+    const repo = makeClone(upstream, 'proj');
+
+    const first = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!' });
+    const second = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!' });
+
+    expect(first.branch).toBe('wt/fix-repo-wt-naming');
+    expect(first.path).toBe(join(tempRoot, 'proj-wt-fix-repo-wt-naming'));
+    expect(second.branch).toBe('wt/fix-repo-wt-naming-2');
+    expect(second.path).toBe(join(tempRoot, 'proj-wt-fix-repo-wt-naming-2'));
+  });
+
+  it('skips a remote semantic branch instead of tracking it for auto-names', async () => {
+    const upstream = makeUpstream('upstream');
+    git(upstream, 'switch', '-c', 'wt/fix-repo-wt-naming');
+    git(upstream, 'commit', '--allow-empty', '-m', 'remote semantic branch');
+    git(upstream, 'switch', 'master');
+    const repo = makeClone(upstream, 'proj');
+
+    const res = await createRepoWorktree(repo, { slug: 'Fix Repo WT naming!' });
+
+    expect(res.branch).toBe('wt/fix-repo-wt-naming-2');
+    expect(res.path).toBe(join(tempRoot, 'proj-wt-fix-repo-wt-naming-2'));
   });
 
   it('uses an explicit new branch name (sanitized into the dir name)', async () => {
@@ -185,5 +212,17 @@ describe('createRepoWorktree', () => {
     mkdirSync(plain);
 
     await expect(createRepoWorktree(plain)).rejects.toThrow();
+  });
+});
+
+describe('worktree semantic slug helpers', () => {
+  it('prefers the title and falls back to the first prompt', () => {
+    expect(localWorktreeSlugFromContext('Fix Repo WT naming!', 'first prompt')).toBe('fix-repo-wt-naming');
+    expect(localWorktreeSlugFromContext('   ', 'Implement the picker')).toBe('implement-the-picker');
+  });
+
+  it('uses a stable hash fallback for non-ascii-only text', () => {
+    expect(slugFromWorktreeText('新建 worktree 和分支')).toBe('worktree');
+    expect(slugFromWorktreeText('看下新开工作树的命名逻辑')).toMatch(/^task-[a-f0-9]{8}$/);
   });
 });

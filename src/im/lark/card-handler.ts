@@ -40,6 +40,7 @@ import type { DaemonSession } from '../../core/types.js';
 import { buildTerminalUrl } from '../../core/terminal-url.js';
 import type { ProjectInfo } from '../../services/project-scanner.js';
 import { createRepoWorktree } from '../../services/git-worktree.js';
+import { worktreeSlugFromContextAI } from '../../services/worktree-slug-ai.js';
 import { t, localeForBot, isLocale, type Locale } from '../../i18n/index.js';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -1766,7 +1767,8 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       try {
         let creation;
         try {
-          creation = await createRepoWorktree(selectedPath);
+          const slug = await worktreeSlugFromContextAI(targetDs.session.title, targetDs.pendingPrompt);
+          creation = await createRepoWorktree(selectedPath, { slug });
         } catch (e) {
           logger.warn(`[${tag(targetDs)}] Worktree creation failed for ${selectedPath}: ${e instanceof Error ? e.message : e}`);
           await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, locTarget));

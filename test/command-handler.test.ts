@@ -137,6 +137,13 @@ vi.mock('../src/services/git-worktree.js', () => ({
   createRepoWorktree: vi.fn(),
 }));
 
+vi.mock('../src/services/worktree-slug-ai.js', () => ({
+  worktreeSlugFromContextAI: vi.fn(async (title?: string, firstPrompt?: string) => {
+    const text = title?.trim() || firstPrompt?.trim();
+    return text?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  }),
+}));
+
 vi.mock('../src/im/lark/card-builder.js', () => ({
   buildRepoSelectCard: vi.fn(() => '{"card":"json"}'),
   buildAdoptSelectCard: vi.fn(() => '{"card":"adopt-select"}'),
@@ -1234,12 +1241,29 @@ describe('handleCommand', () => {
 
       await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1'), deps, LARK_APP_ID);
 
-      expect(createRepoWorktree).toHaveBeenCalledWith('/home/testuser/project-a', { branch: undefined });
+      expect(createRepoWorktree).toHaveBeenCalledWith('/home/testuser/project-a', {
+        branch: undefined,
+        slug: 'test-session',
+      });
       expect(ds.workingDir).toBe('/home/testuser/project-a-wt-1');
       expect(forkWorker).toHaveBeenCalledWith(ds, '', false);
       expect(ds.worktreeCreating).toBe(false);
       const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
       expect(replies).toContain('worktree 已创建');
+    });
+
+    it('keeps an explicit branch instead of auto semantic naming', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+      vi.mocked(createRepoWorktree).mockResolvedValue({ ...CREATION, branch: 'feat/manual' });
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo wt 1 feat/manual'), deps, LARK_APP_ID);
+
+      expect(createRepoWorktree).toHaveBeenCalledWith('/home/testuser/project-a', {
+        branch: 'feat/manual',
+        slug: undefined,
+      });
     });
 
     it('holds the in-flight lock through the created-notice reply (post-git window)', async () => {

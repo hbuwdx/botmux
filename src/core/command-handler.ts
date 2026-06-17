@@ -13,6 +13,7 @@ import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
 import { createRepoWorktree } from '../services/git-worktree.js';
+import { worktreeSlugFromContextAI } from '../services/worktree-slug-ai.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
 import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
@@ -1185,7 +1186,8 @@ export async function handleCommand(
 
         // `/repo wt <N|name|path> [branch]` → create a worktree off the repo's
         // remote default branch and open THAT as the session repo. Without a
-        // branch arg the branch/dir are auto-named (wt/N, <repo>-wt-N).
+        // branch arg the branch/dir are auto-named from the topic title / first
+        // pending prompt when possible (fallback: wt/N, <repo>-wt-N).
         if (ds && /^wt(\s|$)/i.test(repoArg)) {
           const rest = repoArg.replace(/^wt\s*/i, '').trim().split(/\s+/).filter(Boolean);
           if (rest.length < 1 || rest.length > 2) {
@@ -1237,7 +1239,11 @@ export async function handleCommand(
             await sessionReply(rootId, t('cmd.repo.worktree_creating', { repo: repoPath }, loc));
             let creation;
             try {
-              creation = await createRepoWorktree(repoPath, { branch: branchArg });
+              const slug = branchArg ? undefined : await worktreeSlugFromContextAI(ds!.session.title, ds!.pendingPrompt);
+              creation = await createRepoWorktree(repoPath, {
+                branch: branchArg,
+                slug,
+              });
             } catch (e) {
               await sessionReply(rootId, t('cmd.repo.worktree_failed', { error: e instanceof Error ? e.message : String(e) }, loc));
               break;
