@@ -54,6 +54,7 @@ const mockReplyMessage = vi.fn(async () => 'msg-id');
 const mockUpdateMessage = vi.fn(async () => true);
 const mockListChatMessages = vi.fn(async () => [] as any[]);
 const mockListThreadMessages = vi.fn(async () => [] as any[]);
+const mockGetMessageDetail = vi.fn(async () => ({ items: [] as any[] }));
 // 默认所有 open_id 都判为「非真人」（bot）→ 保持既有用例「全部登记」的预期；
 // 需要模拟真人的用例用 mockResolvedValueOnce(true)。
 const mockIsHumanOpenId = vi.fn(async () => false);
@@ -64,6 +65,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   listChatBotMembers: (...args: any[]) => mockListChatBotMembers(...args),
   replyMessage: (...args: any[]) => mockReplyMessage(...args),
   updateMessage: (...args: any[]) => mockUpdateMessage(...args),
+  getMessageDetail: (...args: any[]) => mockGetMessageDetail(...args),
   isHumanOpenId: (...args: any[]) => mockIsHumanOpenId(...args),
   listChatMessages: (...args: any[]) => mockListChatMessages(...args),
   listThreadMessages: (...args: any[]) => mockListThreadMessages(...args),
@@ -119,6 +121,7 @@ const USER_OPEN_ID = 'ou_user_123';
 beforeEach(() => {
   mockListChatMessages.mockReset().mockResolvedValue([]);
   mockListThreadMessages.mockReset().mockResolvedValue([]);
+  mockGetMessageDetail.mockReset().mockResolvedValue({ items: [] });
 });
 
 async function flushEventWork() {
@@ -2874,6 +2877,65 @@ describe('im.message.receive_v1 — content triggers', () => {
     const ctx = handlers.handleNewTopic.mock.calls[0][1] as any;
     expect(ctx.promptOverride).toContain('本次问题已解决，安静一小时后本群将自动解散。');
     expect(ctx.promptOverride).toContain('排查记录 A');
+  });
+
+  it('resolves bot-authored interactive card fallback before matching content triggers', async () => {
+    setupBotState({
+      contentTriggers: [summaryContentTrigger({
+        allowBotMessages: true,
+        match: { type: 'keyword', pattern: '本次问题已解决', caseSensitive: false },
+        history: {
+          topic: { mode: 'current-thread' },
+          regularGroup: { mode: 'recent-messages', limit: 0, sinceHours: 0 },
+        },
+        action: { type: 'start-or-wake-session', prompt: '请总结本次已解决问题。' },
+      })],
+    });
+    mockGetMessageDetail
+      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({
+        items: [{
+          body: {
+            content: JSON.stringify({
+              body: {
+                elements: [
+                  { tag: 'div', text: { content: '@田长远 标记问题已解决' } },
+                  { tag: 'div', text: { content: '本次问题已解决，安静一小时后本群将自动解散。' } },
+                ],
+              },
+            }),
+          },
+        }],
+      });
+    mockListChatMessages.mockResolvedValue([
+      {
+        message_id: 'm1',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: '排查记录 B' }) },
+        sender: { id: 'ou_b', sender_type: 'user' },
+        create_time: '1000',
+      },
+    ]);
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      senderType: 'bot',
+      content: JSON.stringify({ text: '请升级至最新版本客户端，以查看内容' }),
+      rootId: 'quoted-root',
+      threadId: null,
+      messageId: 'msg-bot-card-fallback-trigger',
+      chatId: 'chat-content-trigger',
+    });
+    (event.message as any).message_type = 'interactive';
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(mockGetMessageDetail).toHaveBeenCalledWith(MY_APP_ID, 'msg-bot-card-fallback-trigger', { userCardContent: false });
+    expect(mockGetMessageDetail).toHaveBeenCalledWith(MY_APP_ID, 'msg-bot-card-fallback-trigger', { userCardContent: true });
+    expect(mockListChatMessages).toHaveBeenCalledWith(MY_APP_ID, 'chat-content-trigger', 0);
+    const ctx = handlers.handleNewTopic.mock.calls[0][1] as any;
+    expect(ctx.promptOverride).toContain('本次问题已解决，安静一小时后本群将自动解散。');
+    expect(ctx.promptOverride).toContain('排查记录 B');
   });
 
   it('still ignores self-authored messages even when a trigger allows bot messages', async () => {

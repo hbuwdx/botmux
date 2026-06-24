@@ -15,7 +15,7 @@ import { BoundedMap } from '../../utils/bounded-map.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
-import { extractCardContent, stripLeadingMentions, unwrapUserDslContent } from './message-parser.js';
+import { extractCardContent, resolveNonsupportMessage, stripLeadingMentions, unwrapUserDslContent } from './message-parser.js';
 import { recordObservedBots, listObservedBots } from '../../services/observed-bots-store.js';
 import { getDocSubscription, listAllDocSubscriptions, type DocSubscription } from '../../services/doc-subs-store.js';
 import { getDocComment, isBotAuthoredReply, hasBotSentinel } from './doc-comment.js';
@@ -1322,6 +1322,21 @@ async function resolveContentTriggerMatch(input: {
   return findMatchingContentTrigger(triggers, text, chatKind, { botAuthored: input.botAuthored });
 }
 
+function hasContentTriggerCandidates(larkAppId: string, options?: { botAuthored?: boolean }): boolean {
+  const triggers = getBot(larkAppId).config.contentTriggers;
+  if (!triggers || triggers.length === 0) return false;
+  return triggers.some(trigger => trigger.enabled && (!options?.botAuthored || trigger.allowBotMessages === true));
+}
+
+async function maybeResolveMessageForContentTrigger(larkAppId: string, data: any, options?: { botAuthored?: boolean }): Promise<void> {
+  if (!hasContentTriggerCandidates(larkAppId, options)) return;
+  const type = data?.message?.message_type;
+  if (type !== 'interactive' && type !== 'nonsupport') return;
+  await resolveNonsupportMessage(data, larkAppId).catch(err =>
+    logger.debug(`[content-trigger] failed to resolve ${type} message before matching: ${err}`),
+  );
+}
+
 const SUMMARY_COMMAND_RE = /^\/summary(?:\s|$)/i;
 
 function summaryCommandText(message: any): string | undefined {
@@ -1552,6 +1567,8 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
           const foreignBotMentionedThisBot = isBotMentioned(larkAppId, message, undefined);
           if (!foreignBotMentionedThisBot) {
+            if (!hasContentTriggerCandidates(larkAppId, { botAuthored: true })) return;
+            await maybeResolveMessageForContentTrigger(larkAppId, data, { botAuthored: true });
             const decision = await decideRoutingWithSource(larkAppId, message);
             const contentTriggerMatch = await resolveContentTriggerMatch({
               larkAppId,
@@ -1837,6 +1854,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           }
         }
 
+        if (!explicitlyMentionedThisBot) {
+          await maybeResolveMessageForContentTrigger(larkAppId, data);
+        }
         const contentTriggerMatch = await resolveContentTriggerMatch({
           larkAppId,
           chatId,
