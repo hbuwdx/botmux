@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { appendEvent } from '../src/workflows/v3/journal.js';
@@ -168,6 +168,37 @@ describe('v3 ops-projection — ptyLogPathFor（服务端定位，不直出前�
       const runDir2 = buildRun(base, 'nofile-260602-0001');
       expect(runDir2).toContain('nofile');
       expect(ptyLogPathFor(base, 'nofile-260602-0001', 'research')).toBeUndefined();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('read-only projection tolerates a corrupt journal (hardening #11 carve-out)', () => {
+  it('projectRun/projectRunById/listRuns degrade instead of throwing on mid-file corruption', () => {
+    const base = mkdtempSync(join(tmpdir(), 'v3-ops-corrupt-'));
+    try {
+      const runDir = buildRun(base, 'corrupt-260602-0001');
+      // Inject a corrupt line that is NOT the last line (a torn FINAL line is
+      // tolerated by readJournal; a mid-file one makes it fail-loud). Then append
+      // a valid event after it so the corrupt line sits in the middle.
+      const jp = join(runDir, 'journal.ndjson');
+      appendFileSync(jp, '{ this is not json\n');
+      appendEvent(jp, { type: 'runSucceeded', runId: 'corrupt-260602-0001' });
+
+      // Read-only dashboard paths must NOT throw — they degrade to a sparse view
+      // so one corrupt run can't 500 the whole list or its own detail page.
+      expect(() => projectRun('corrupt-260602-0001', runDir)).not.toThrow();
+      expect(() => projectRunById(base, 'corrupt-260602-0001')).not.toThrow();
+      expect(() => listRuns(base)).not.toThrow();
+
+      const view = projectRunById(base, 'corrupt-260602-0001');
+      expect(view?.runId).toBe('corrupt-260602-0001');
+      // A second, healthy run still shows up in the list alongside the bad one.
+      buildRun(base, 'healthy-260602-0002');
+      const ids = listRuns(base).map((r) => r.runId);
+      expect(ids).toContain('healthy-260602-0002');
+      expect(ids).toContain('corrupt-260602-0001');
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

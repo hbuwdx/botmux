@@ -181,7 +181,19 @@ function readDagNodes(runDir: string): DagNodeLite[] {
  */
 export function projectRun(runId: string, runDir: string): RunView {
   const journalPath = join(runDir, 'journal.ndjson');
-  const events = existsSync(journalPath) ? readJournal(journalPath) : [];
+  // readJournal is fail-loud on mid-file corruption (hardening #11) for the
+  // RUNTIME paths, but projectRun is the read-only dashboard projection and is
+  // contractually defensive (see above): degrade to a sparse view instead of
+  // throwing, so one corrupt journal can't 500 the whole runs list or its own
+  // detail page. The runtime (decision-making) callers still get the throw.
+  let events: ReturnType<typeof readJournal> = [];
+  if (existsSync(journalPath)) {
+    try {
+      events = readJournal(journalPath);
+    } catch {
+      events = [];
+    }
+  }
   const snap = materialize(events);
   const dagNodes = readDagNodes(runDir);
 
@@ -316,8 +328,16 @@ export function ptyLogPathFor(runsDir: string, runId: string, nodeId: string): s
   const journalPath = join(runDir, 'journal.ndjson');
   if (!existsSync(journalPath)) return undefined;
 
+  // Read-only endpoint: a corrupt journal (readJournal fail-loud) degrades to
+  // "no pty log" (→ 404) rather than a 500 (hardening #11 read-only carve-out).
+  let events: ReturnType<typeof readJournal>;
+  try {
+    events = readJournal(journalPath);
+  } catch {
+    return undefined;
+  }
   let recorded: string | undefined;
-  for (const e of readJournal(journalPath)) {
+  for (const e of events) {
     if (e.type === 'nodeSessionReady' && e.nodeId === nodeId && e.ptyLogPath) recorded = e.ptyLogPath;
   }
   if (!recorded) return undefined;
