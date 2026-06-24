@@ -52,7 +52,7 @@ function termSig(node: RunNodeView): string {
 }
 
 export function renderV3RunsPage(root: HTMLElement): () => void {
-  const m = location.hash.match(/^#\/v3\/([^?#]+)/);
+  const m = location.hash.match(/^#\/workflows\/([^?#]+)/);
   if (m) return renderV3DetailPage(root, decodeURIComponent(m[1]!));
   return renderV3ListPage(root);
 }
@@ -62,14 +62,14 @@ export function renderV3RunsPage(root: HTMLElement): () => void {
 function renderV3ListPage(root: HTMLElement): () => void {
   root.innerHTML = `
     <div class="page-head">
-      <h1>V3 Runs</h1>
+      <h1>工作流</h1>
       <p class="muted">LLM 编排的 workflow 运行 — DAG 图 + 每节点终端</p>
     </div>
     <table class="data-table">
       <thead><tr><th>Run</th><th>状态</th><th>节点数</th></tr></thead>
       <tbody id="v3-tbody"></tbody>
     </table>
-    <div id="v3-empty" class="muted" hidden style="padding:1rem">暂无 v3 run（用 <code>/workflow new</code> 发起一个）</div>`;
+    <div id="v3-empty" class="muted" hidden style="padding:1rem">暂无工作流运行（用 <code>/workflow new</code> 发起一个）</div>`;
   const tbody = root.querySelector<HTMLElement>('#v3-tbody')!;
   const empty = root.querySelector<HTMLElement>('#v3-empty')!;
   let timer: number | null = null;
@@ -86,7 +86,7 @@ function renderV3ListPage(root: HTMLElement): () => void {
       tbody.innerHTML = runs
         .map(
           (rn) => `<tr>
-            <td><a class="v3r-runid" href="#/v3/${encodeURIComponent(rn.runId)}">${esc(rn.runId)}</a></td>
+            <td><a class="v3r-runid" href="#/workflows/${encodeURIComponent(rn.runId)}">${esc(rn.runId)}</a></td>
             <td><span class="v3r-pill rs-${esc(rn.runStatus)}">${esc(rn.runStatus)}</span></td>
             <td>${rn.nodeCount}</td>
           </tr>`,
@@ -125,7 +125,7 @@ function nodeH(n: RunNodeView): number {
 function renderV3DetailPage(root: HTMLElement, runId: string): () => void {
   root.innerHTML = `
     <div class="page-head">
-      <a href="#/v3" class="btn-link">← Runs</a>
+      <a href="#/workflows" class="btn-link">← 工作流</a>
       <h1 class="v3r-title">${esc(runId)}</h1>
       <span id="v3-runstatus" class="v3r-pill"></span>
     </div>
