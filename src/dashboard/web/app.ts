@@ -11,6 +11,7 @@ import { renderTeamFederationPage, renderTeamManagePage } from './team-federatio
 import { renderConnectorsPage } from './connectors.js';
 import { renderSettingsPage } from './settings.js';
 import { renderV3RunsPage } from './v3.js';
+import { renderWorkflowsPage } from './workflows.js';
 import { renderOfficePage } from './office.js';
 import { renderWhiteboardsPage } from './whiteboards.js';
 import { renderInsightsPage } from './insights.js';
@@ -259,20 +260,22 @@ function route() {
     highlightNav(hash);
     return;
   }
-  // The old v2 "工作流(beta)" surface (runs list + template catalog) is gone;
-  // the Workflows nav now points at the v3 runs page. Keep legacy URLs alive:
-  //   - `#/v3[/<id>]`                  → `#/workflows[/<id>]` (v3 promoted)
-  //   - `#/workflows/catalog`, `#/workflows-catalog` → `#/workflows`
-  // so old bookmarks/pasted links land on the current page instead of 404'ing.
-  if (hash.startsWith('#/v3')) {
+  // The "工作流" nav now points at the v3 runs page (#/workflows). The v2 (v0.2)
+  // engine is kept (backend + Feishu cards), so its run-detail page survives at
+  // the dedicated #/legacy-workflow route (where v2 cards now link). Legacy URL
+  // upkeep so old bookmarks/pasted links don't 404:
+  //   - `#/v3[/<id>]`                                 → `#/workflows[/<id>]` (v3 promoted)
+  //   - `#/workflows/catalog`, `#/workflows-catalog`  → `#/workflows` (v2 catalog gone)
+  if (hash.startsWith('#/legacy-workflow')) {
+    pageDispose = renderWorkflowsPage(root);
+  } else if (hash.startsWith('#/v3')) {
     window.location.replace(`#/workflows${hash.slice('#/v3'.length)}`);
     return;
-  }
-  if (hash.startsWith('#/workflows/catalog') || hash.startsWith('#/workflows-catalog')) {
+  } else if (hash.startsWith('#/workflows/catalog') || hash.startsWith('#/workflows-catalog')) {
     window.location.replace('#/workflows');
     return;
   }
-  if (hash.startsWith('#/workflows')) pageDispose = renderV3RunsPage(root);
+  else if (hash.startsWith('#/workflows')) pageDispose = renderV3RunsPage(root);
   else if (hash.startsWith('#/groups')) renderGroupsPage(root);
   else if (hash.startsWith('#/settings')) void renderSettingsPage(root);
   else if (hash.startsWith('#/bot-defaults')) renderBotDefaultsPage(root);
