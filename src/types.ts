@@ -26,6 +26,8 @@ export interface Session {
   kanbanColumn?: string;
   /** 看板列内手动排序位置（拖拽时取相邻卡片中点，允许小数）。 */
   kanbanPosition?: number;
+  /** Dashboard 会话锁定：锁定后自动清理空闲会话时跳过；手动关闭仍允许。 */
+  locked?: boolean;
   /** Dashboard「创建会话」入待办池：会话已建（群已拉、bot 已邀请）但 CLI 还没起，
    *  内容暂存在 queuedPrompt 里，停在看板「待办池」列。被激活（拖到进行中 / 点
    *  「开始」/ 群里来第一条消息）时才 forkWorker 把 queuedPrompt 当首轮发给 CLI。

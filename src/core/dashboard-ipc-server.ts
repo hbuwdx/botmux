@@ -510,6 +510,25 @@ ipcRoute('POST', '/api/sessions/:sessionId/rename', async (req, res, params) => 
   jsonRes(res, 200, { ok: true, title });
 });
 
+// 会话锁定：保护被锁定会话不被 dashboard「清理空闲」批量关闭。锁定是会话元数据，
+// 不影响用户显式点击关闭/批量关闭，避免把会话变成不可管理状态。
+ipcRoute('POST', '/api/sessions/:sessionId/lock', async (req, res, params) => {
+  let body: { locked?: unknown };
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  if (typeof body.locked !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'bad_locked' });
+  const session = findSessionRecord(params.sessionId);
+  if (!session) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+  if (body.locked) session.locked = true;
+  else delete session.locked;
+  sessionStore.updateSession(session);
+  const locked = !!session.locked;
+  dashboardEventBus.publish({
+    type: 'session.update',
+    body: { sessionId: params.sessionId, patch: { locked } },
+  });
+  jsonRes(res, 200, { ok: true, locked });
+});
+
 /**
  * Mint the WRITABLE web-terminal link for a live session — the dashboard
  * counterpart to the Lark card's "🔑 获取操作链接" button. Returns the URL with

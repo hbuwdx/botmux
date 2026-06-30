@@ -129,6 +129,65 @@ describe('POST /api/sessions/:sessionId/close', () => {
   });
 });
 
+describe('POST /api/sessions/:sessionId/lock', () => {
+  it('persists the lock flag and publishes a dashboard patch', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-lock-'));
+    const prevDataDir = process.env.SESSION_DATA_DIR;
+    const prevConfigDataDir = config.session.dataDir;
+    const seen: any[] = [];
+    const off = dashboardEventBus.subscribe(e => seen.push(e));
+    try {
+      config.session.dataDir = dataDir;
+      sessionStore.init();
+      const session = sessionStore.createSession('oc_lock', 'om_lock', 'lock me', 'group');
+
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const lockRes = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/${session.sessionId}/lock`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ locked: true }),
+      });
+
+      expect(lockRes.status).toBe(200);
+      expect(await lockRes.json()).toEqual({ ok: true, locked: true });
+      expect(sessionStore.getSession(session.sessionId)?.locked).toBe(true);
+      expect(seen).toContainEqual({
+        type: 'session.update',
+        body: { sessionId: session.sessionId, patch: { locked: true } },
+      });
+
+      const unlockRes = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/${session.sessionId}/lock`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ locked: false }),
+      });
+
+      expect(unlockRes.status).toBe(200);
+      expect(await unlockRes.json()).toEqual({ ok: true, locked: false });
+      expect(sessionStore.getSession(session.sessionId)?.locked).toBeUndefined();
+    } finally {
+      off();
+      sessionStore.init();
+      if (prevDataDir === undefined) delete process.env.SESSION_DATA_DIR;
+      else process.env.SESSION_DATA_DIR = prevDataDir;
+      config.session.dataDir = prevConfigDataDir;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed lock payloads', async () => {
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/anything/lock`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ locked: 'yes' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ ok: false, error: 'bad_locked' });
+  });
+});
+
 describe('POST /api/sessions/:sessionId/restart', () => {
   it('sends a restart IPC message to the live worker', async () => {
     const send = vi.fn();

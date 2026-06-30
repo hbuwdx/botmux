@@ -1627,9 +1627,9 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { ok: true, entry });
     }
 
-    // 看板放置 / 重命名：带 JSON body 的会话写操作，原样转发给 owner daemon。
+    // 看板放置 / 重命名 / 锁定：带 JSON body 的会话写操作，原样转发给 owner daemon。
     // 不在公开读白名单内 → 只读访客在 decideDashboardAuth 已被 401。
-    if (req.method === 'POST' && (m = url.pathname.match(/^\/api\/sessions\/([^/]+)\/(board|rename)$/))) {
+    if (req.method === 'POST' && (m = url.pathname.match(/^\/api\/sessions\/([^/]+)\/(board|rename|lock)$/))) {
       const sid = decodeURIComponent(m[1]); const op = m[2];
       const owner = aggregator.ownerOf(sid);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
