@@ -2601,6 +2601,13 @@ server.on('upgrade', (req: IncomingMessage, clientSocket: Duplex, head: Buffer) 
   }
 });
 
+// 拉长 keep-alive 空闲超时：中心化平台反代用 keep-alive 连接池复用隧道连接，但 Node 默认
+// keepAliveTimeout 才 5s——空闲>5s 后 dashboard 把连接关了，而平台侧 Agent 可能还把它留在池里
+// 复用 → 撞到刚关的连接、首批请求 502。把它拉到 75s（headersTimeout 需更大），让池里的连接在
+// 正常使用间隔内不被这端提前关掉，平台复用稳、不再有 stale-reuse 的首批 502。本地直连无副作用。
+server.keepAliveTimeout = 75_000;
+server.headersTimeout = 80_000;
+
 // Probe upward on EADDRINUSE rather than crashing with an unhandled 'error':
 // a second botmux instance on this host (or a stray process) holding the
 // configured port would otherwise tear the dashboard process down on bind.
