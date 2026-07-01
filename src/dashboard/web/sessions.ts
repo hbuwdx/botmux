@@ -128,6 +128,13 @@ function repoBasename(workingDir: unknown): string {
 
 function terminalHref(s: any): string | null {
   if (!s.webPort) return null;
+  // 经中心化平台访问时（本页是 HTTPS 机器子域 m-<id>.<host>）：终端走**同源 /s/<session>**——
+  // 平台在 443 反代该路径 → 本机 dashboard → 本地终端。不能带 :port（平台只在 443 反代，:8801 打不通）。
+  // 需要本地终端反代口(proxyPort)已起；没起则平台侧无法反代，返回 null 不给死链。
+  if (location.protocol === 'https:') {
+    return s.proxyPort ? `${location.origin}/s/${encodeURIComponent(s.sessionId)}` : null;
+  }
+  // 本地直连：http://host:port[/s/...]
   const port = s.proxyPort ?? s.webPort;
   const suffix = s.proxyPort ? `/s/${encodeURIComponent(s.sessionId)}` : '';
   return `http://${location.hostname}:${port}${suffix}`;
