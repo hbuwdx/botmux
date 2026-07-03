@@ -815,11 +815,17 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
 
   // CLI 适配器：可搜索的级联选择器（选 Aiden 可进 × Claude / × Codex，aiden 网关）。
   // 非交互终端自动回退为序号 / ID 文本输入。
+  // Esc = 中止 setup（不写盘）。新建流程的必答题没有"上一步"可退，绝不静默
+  // 替用户选默认——扫码建出的应用可事后用「选择已有应用」找回，不会丢。
   const selKey = await pickCliSelection(rl, { title: '选择 CLI 适配器' });
+  if (selKey === null) {
+    console.log('\n已取消（Esc），setup 中止，不写任何配置。');
+    return null;
+  }
   let cliId: CliId;
   let wrapperCli: string | undefined;
   try {
-    const sel = resolveCliSelection(selKey ?? 'claude-code');
+    const sel = resolveCliSelection(selKey);
     cliId = sel.cliId;
     wrapperCli = sel.wrapperCli;
   } catch (err: any) {
@@ -839,8 +845,13 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
       { label: '仓库选择卡片', hint: '新话题先弹卡片，从扫描到的 git 仓库中选一个再启动' },
     ],
     defaultIndex: 0,
-    footer: '之后可用 /config 或 botmux setup edit 修改',
+    footer: 'Esc 取消 setup · 之后可用 /config 或 botmux setup edit 修改',
   });
+  // Esc = 中止 setup，不静默套用推荐默认（非 TTY 留空走 defaultIndex，不受影响）。
+  if (dirMode === null) {
+    console.log('\n已取消（Esc），setup 中止，不写任何配置。');
+    return null;
+  }
   let workingDir: string | undefined;
   let defaultWorkingDir: string | undefined;
   if (dirMode === 1) {
@@ -957,7 +968,7 @@ async function pickBotSelection(
       label: botProcessName(b, i, PM2_NAME),
       hint: `${b?.larkAppId ?? ''} · ${b?.cliId ?? 'claude-code'}`,
     })),
-    footer: 'Esc 取消',
+    footer: 'Esc 返回操作菜单',
   });
   if (idx === null) return undefined;
   console.log(` ✔ ${title}: ${botProcessName(bots[idx], idx, PM2_NAME)}`);
@@ -1409,6 +1420,10 @@ async function cmdSetup(): Promise<void> {
     console.log('');
 
     const rl = createInterface({ input: process.stdin, output: process.stdout });
+    // 交互模式下子界面（选机器人）Esc = 返回本操作菜单；非 TTY 无 Esc，保持
+    // 「无效选择即报错退出」旧语义，避免管道输入在循环里打转。
+    const interactiveMenus = process.stdin.isTTY && process.stdout.isTTY;
+    for (;;) {
     const action = await pickChoice(rl, {
       title: '操作',
       items: [
@@ -1450,6 +1465,10 @@ async function cmdSetup(): Promise<void> {
       console.log('\n── 编辑现有机器人 ──\n');
       const index = await pickBotSelection(rl, bots, '选择要编辑的机器人');
       if (index === undefined) {
+        if (interactiveMenus) {
+          console.log('   已返回操作菜单。\n');
+          continue;
+        }
         rl.close();
         console.log('\n❌ 未选择机器人，配置未修改。');
         return;
@@ -1508,6 +1527,10 @@ async function cmdSetup(): Promise<void> {
       console.log('\n── 删除机器人 ──\n');
       const delIndex = await pickBotSelection(rl, bots, '选择要删除的机器人');
       if (delIndex === undefined) {
+        if (interactiveMenus) {
+          console.log('   已返回操作菜单。\n');
+          continue;
+        }
         rl.close();
         console.log('\n❌ 未选择机器人，配置未修改。');
         return;
@@ -1544,6 +1567,8 @@ async function cmdSetup(): Promise<void> {
     console.log(`   配置文件: ${BOTS_JSON_FILE}`);
     await finishOpenPlatformSetup(newBot.larkAppId, botBrand(newBot));
     console.log(`下一步: botmux restart\n`);
+    return;
+    }
 
   } else if (hasEnv) {
     // --- Single-bot mode (.env exists) ---

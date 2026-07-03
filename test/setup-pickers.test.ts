@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { pickChoice } from '../src/setup/interactive-select.js';
+import { computeViewportTop, pickChoice, truncateToWidth } from '../src/setup/interactive-select.js';
 import {
   listOpenPlatformApps,
   fetchOpenPlatformAppSecret,
@@ -39,6 +39,36 @@ describe('pickChoice non-TTY fallback', () => {
 
   it('returns null for an empty item list', async () => {
     expect(await pickChoice(fakeRl(['1']), { title: 't', items: [] })).toBe(null);
+  });
+});
+
+describe('computeViewportTop (长列表视口滚动)', () => {
+  it('keeps everything at 0 when the list fits', () => {
+    expect(computeViewportTop(5, 0, 8, 10)).toBe(0);
+    expect(computeViewportTop(7, 3, 8, 10)).toBe(0);
+  });
+
+  it('scrolls down to keep the cursor visible and clamps at the end', () => {
+    expect(computeViewportTop(0, 0, 40, 10)).toBe(0);
+    expect(computeViewportTop(10, 0, 40, 10)).toBe(1);   // 光标越过窗口底部 → 下移一行
+    expect(computeViewportTop(39, 25, 40, 10)).toBe(30); // 尾部 clamp
+  });
+
+  it('scrolls up when the cursor wraps back above the window', () => {
+    expect(computeViewportTop(0, 30, 40, 10)).toBe(0);   // 底部 wrap 回顶部
+    expect(computeViewportTop(29, 30, 40, 10)).toBe(29);
+  });
+});
+
+describe('truncateToWidth', () => {
+  it('keeps short strings and truncates long ones with an ellipsis', () => {
+    expect(truncateToWidth('abc', 10)).toBe('abc');
+    expect(truncateToWidth('abcdefghij', 6)).toBe('abcde…');
+  });
+
+  it('counts CJK as double width', () => {
+    expect(truncateToWidth('机器人列表', 10)).toBe('机器人列表'); // 宽 10 恰好放下
+    expect(truncateToWidth('机器人列表很长', 8)).toBe('机器人…');
   });
 });
 
