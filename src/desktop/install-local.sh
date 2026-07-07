@@ -6,7 +6,6 @@ DESTINATION="/Applications/Botmux.app"
 OPEN_AFTER_INSTALL=1
 SKIP_BUILD=0
 SKIP_DEPS=0
-SKIP_LINK=0
 
 usage() {
   cat <<'EOF'
@@ -18,7 +17,6 @@ Options:
   --no-open          Do not open the app after installation.
   --skip-build       Reuse an existing dist/mac*/Botmux.app build.
   --skip-deps        Do not run pnpm install when node_modules is missing.
-  --skip-link        Do not run pnpm link --global.
   -h, --help         Show this help.
 EOF
 }
@@ -56,38 +54,6 @@ resolve_app_version() {
   printf '%s\n' "$version"
 }
 
-path_contains() {
-  case ":$PATH:" in
-    *":$1:"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-ensure_pnpm_global_bin_in_path() {
-  local candidate
-  local candidates=()
-  local configured_bin
-
-  configured_bin="$(pnpm config get global-bin-dir 2>/dev/null || true)"
-  if [[ -n "$configured_bin" && "$configured_bin" != "undefined" && "$configured_bin" != "null" ]]; then
-    candidates+=("$configured_bin")
-  fi
-
-  # `pnpm link --global` validates PNPM_HOME even when global-bin-dir is set.
-  # Non-login shells often miss this path, so source installs add it locally.
-  if [[ -n "${PNPM_HOME:-}" ]]; then
-    candidates+=("$PNPM_HOME")
-  fi
-  candidates+=("$HOME/Library/pnpm/bin")
-
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" ]] || continue
-    if ! path_contains "$candidate"; then
-      export PATH="$candidate:$PATH"
-    fi
-  done
-}
-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --app-path)
@@ -105,10 +71,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-deps)
       SKIP_DEPS=1
-      shift
-      ;;
-    --skip-link)
-      SKIP_LINK=1
       shift
       ;;
     -h|--help)
@@ -147,25 +109,11 @@ fi
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   APP_VERSION="$(resolve_app_version)"
 
-  log "Build CLI and dashboard"
-  pnpm build
-
   log "Build Desktop bundle"
   pnpm desktop:bundle
 
   log "Package Botmux.app locally (version $APP_VERSION)"
   pnpm exec electron-builder --mac dir --config electron-builder.yml -c.extraMetadata.version="$APP_VERSION"
-fi
-
-if [[ "$SKIP_LINK" -eq 0 ]]; then
-  log "Link this source checkout as the global botmux CLI"
-  # The Desktop app is CLI-first. Linking keeps the App and global CLI on the
-  # same source checkout without adding App installation commands to botmux CLI.
-  ensure_pnpm_global_bin_in_path
-  pnpm link --global
-  # Keep Botmux's own shim in sync too; Desktop can discover it when GUI PATH
-  # does not expose the package-manager global binary.
-  pnpm use:here
 fi
 
 BUILT_APP=""

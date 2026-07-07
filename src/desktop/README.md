@@ -26,13 +26,14 @@ bash src/desktop/install-local.sh
 脚本会执行这些步骤：
 
 1. 安装依赖（如 `node_modules` 缺失）。
-2. 构建 CLI、dashboard 和 Desktop bundle。
-3. 执行 `pnpm link --global`，并同步 `~/.botmux/bin/botmux`，让全局 `botmux` 指向这份源码。
-4. 解析源码版本号，并使用 electron-builder 生成本机 `Botmux.app`。
-5. 退出正在运行的 Botmux App。
-6. 安装到 `/Applications/Botmux.app`。
-7. 使用本机 ad-hoc 签名并移除 quarantine。
-8. 默认打开 App。
+2. 构建 Desktop bundle。
+3. 解析源码版本号，并使用 electron-builder 生成本机 `Botmux.app`。
+4. 退出正在运行的 Botmux App。
+5. 安装到 `/Applications/Botmux.app`。
+6. 使用本机 ad-hoc 签名并移除 quarantine。
+7. 默认打开 App。
+
+脚本只安装 App，不会安装、升级、link 或修改用户机器上的全局 `botmux` CLI。App 启动后会连接用户已经安装好的全局 CLI；如果未安装 CLI，App 会进入可解释的 setup/degraded 状态。
 
 常用参数：
 
@@ -40,11 +41,10 @@ bash src/desktop/install-local.sh
 bash src/desktop/install-local.sh --no-open
 bash src/desktop/install-local.sh --skip-build
 bash src/desktop/install-local.sh --skip-deps
-bash src/desktop/install-local.sh --skip-link
 bash src/desktop/install-local.sh --app-path /Applications/Botmux.app
 ```
 
-`--skip-build` 适合已经运行过 `pnpm build && pnpm desktop:bundle && pnpm exec electron-builder --mac dir --config electron-builder.yml -c.extraMetadata.version=<version>` 的开发场景。
+`--skip-build` 适合已经运行过 `pnpm desktop:bundle && pnpm exec electron-builder --mac dir --config electron-builder.yml -c.extraMetadata.version=<version>` 的开发场景。
 
 如果源码不是 git checkout，脚本无法通过 tag 推导版本号，可以显式传入：
 
@@ -61,7 +61,7 @@ git pull
 bash src/desktop/install-local.sh
 ```
 
-因为 App 始终依赖全局 `botmux` CLI，脚本会重新 `pnpm link --global` 并同步 `~/.botmux/bin/botmux`，保证 App 和 CLI 指向同一份源码。
+这个脚本只更新 App 本体，不会变更全局 CLI。如果用户需要升级 CLI，应按 CLI 自己的安装/升级方式单独处理。
 
 ## 验证
 

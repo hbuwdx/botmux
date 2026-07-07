@@ -11,20 +11,21 @@ describe('desktop local source installer docs', () => {
     expect(script).toContain('resolve_app_version');
     expect(script).toContain('BOTMUX_DESKTOP_VERSION');
     expect(script).toContain('-c.extraMetadata.version="$APP_VERSION"');
-    expect(script).toContain('ensure_pnpm_global_bin_in_path');
-    expect(script).toContain('$HOME/Library/pnpm/bin');
-    expect(script).toContain('pnpm link --global');
-    expect(script).toContain('pnpm use:here');
     expect(script).toContain('pnpm desktop:bundle');
     expect(script).toContain('electron-builder --mac dir');
     expect(script).toContain('codesign --force --deep --sign -');
     expect(script).toContain('xattr -dr com.apple.quarantine');
+    expect(script).not.toContain('pnpm link --global');
+    expect(script).not.toContain('pnpm use:here');
+    expect(script).not.toContain('--skip-link');
     expect(script).not.toContain('botmux app');
 
     expect(readme).toContain('bash src/desktop/install-local.sh');
-    expect(readme).toContain('pnpm link --global');
-    expect(readme).toContain('~/.botmux/bin/botmux');
+    expect(readme).toContain('脚本只安装 App');
     expect(readme).toContain('BOTMUX_DESKTOP_VERSION');
+    expect(readme).not.toContain('pnpm link --global');
+    expect(readme).not.toContain('~/.botmux/bin/botmux');
+    expect(readme).not.toContain('--skip-link');
     expect(readme).not.toContain('botmux app');
   });
 });
