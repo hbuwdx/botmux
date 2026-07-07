@@ -64,6 +64,16 @@ describe('zonedWallClockToUtc — wall-clock in a zone → UTC instant', () => {
     expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 1, 8, 9, 0).toISOString())
       .toBe('2026-01-08T17:00:00.000Z');
   });
+  it('spring-forward gap (LA 2026-03-08 02:30 does not exist) pushes forward like croner → 10:30Z (03:30 PDT)', () => {
+    // 02:00–02:59 is skipped that day. croner("30 2 * * *") fires at 03:30 PDT =
+    // 2026-03-08T10:30Z; the one-shot「明天2:30」must match, not land an hour before.
+    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 3, 8, 2, 30).toISOString())
+      .toBe('2026-03-08T10:30:00.000Z');
+  });
+  it('fall-back repeated hour (LA 2026-11-01 01:30 occurs twice) resolves to the first (PDT) occurrence', () => {
+    expect(zonedWallClockToUtc('America/Los_Angeles', 2026, 11, 1, 1, 30).toISOString())
+      .toBe('2026-11-01T08:30:00.000Z');
+  });
 });
 
 describe('zonedTomorrowAt — "tomorrow HH:MM" in a zone (injected now)', () => {

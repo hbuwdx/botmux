@@ -8,7 +8,7 @@
  * Run:  pnpm vitest run test/scheduler.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { parseNaturalSchedule, parseSchedule, computeNextRun, extractDeliveryMode } from '../src/core/scheduler.js';
+import { parseNaturalSchedule, parseSchedule, computeNextRun, extractDeliveryMode, planCronRealign } from '../src/core/scheduler.js';
 
 // ─── Helper ──────────────────────────────────────────────────────────────────
 
@@ -582,5 +582,44 @@ describe('computeNextRun', () => {
     expect(nextDate.getTime()).toBeGreaterThan(Date.now());
     expect(nextDate.getHours()).toBe(9);
     expect(nextDate.getMinutes()).toBe(0);
+  });
+});
+
+// ─── Timezone-change re-alignment (Codex review finding #1) ──────────────────
+
+describe('planCronRealign — recompute cron nextRunAt on timezone change', () => {
+  const STALE = '2020-01-01T00:00:00.000Z'; // clearly in the past & wrong-zone
+  const mk = (over: Record<string, unknown>) => ({
+    id: 'x', name: 'x', enabled: true, nextRunAt: STALE, ...over,
+  } as any);
+
+  it('recomputes an enabled cron task to a future instant; skips interval/once/disabled', () => {
+    const tasks = [
+      mk({ id: 'cron1', parsed: { kind: 'cron', expr: '0 9 * * *', display: '每天 9:00' } }),
+      mk({ id: 'interval1', parsed: { kind: 'interval', minutes: 30, display: 'every 30m' } }),
+      mk({ id: 'once1', parsed: { kind: 'once', runAt: STALE, display: 'once' } }),
+      mk({ id: 'cronDisabled', enabled: false, parsed: { kind: 'cron', expr: '0 9 * * *', display: '每天 9:00' } }),
+    ];
+    const plan = planCronRealign(tasks);
+    // Only the enabled cron task is re-planned.
+    expect(plan.map(p => p.id)).toEqual(['cron1']);
+    expect(new Date(plan[0].nextRunAt).getTime()).toBeGreaterThan(Date.now());
+    expect(plan[0].nextRunAt).not.toBe(STALE);
+  });
+
+  it('honors the ownership predicate (skips tasks another daemon owns)', () => {
+    const tasks = [
+      mk({ id: 'mine', parsed: { kind: 'cron', expr: '0 9 * * *', display: 'd' } }),
+      mk({ id: 'theirs', parsed: { kind: 'cron', expr: '0 9 * * *', display: 'd' } }),
+    ];
+    const plan = planCronRealign(tasks, t => t.id === 'mine');
+    expect(plan.map(p => p.id)).toEqual(['mine']);
+  });
+
+  it('is idempotent: a cron task already at the correct next-run is not re-planned', () => {
+    const parsed = { kind: 'cron' as const, expr: '0 9 * * *', display: 'd' };
+    const current = computeNextRun(parsed)!; // already the correct next occurrence
+    const plan = planCronRealign([mk({ id: 'cron1', parsed, nextRunAt: current })]);
+    expect(plan).toEqual([]);
   });
 });

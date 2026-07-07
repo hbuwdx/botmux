@@ -43,7 +43,7 @@ import {
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
-import { hostLocalTimeZone } from './utils/timezone.js';
+import { hostLocalTimeZone, scheduleTimeZone } from './utils/timezone.js';
 import { buildDashboardUrls, type DashboardUrls } from './core/dashboard-url.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion, botmuxCliEntry } from './utils/install-info.js';
@@ -1332,7 +1332,10 @@ const server = createServer(async (req, res) => {
       const schedules = authed
         ? aggregator.getSchedules()
         : redactSchedulesForPublic(aggregator.getSchedules());
-      return jsonRes(res, 200, { schedules });
+      // Effective schedule timezone: nextRunAt/lastRunAt instants must be
+      // rendered in the zone the scheduler fires in (not the viewer's browser
+      // zone), so the web schedule/overview lists match cron/card/CLI displays.
+      return jsonRes(res, 200, { schedules, timezone: scheduleTimeZone() });
     }
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       // `authed` lets the Settings page disable toggles for read-only

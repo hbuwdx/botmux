@@ -9,6 +9,11 @@ import type { ScheduledTask, ParsedSchedule } from '../types.js';
 // Callback set by daemon to execute a scheduled task
 let executeCallback: ((task: ScheduledTask) => Promise<void>) | null = null;
 let tickTimer: NodeJS.Timeout | null = null;
+// Last effective schedule timezone seen by the tick loop. When it changes
+// (dashboard config / env / host), enabled CRON tasks' persisted nextRunAt was
+// computed under the OLD zone and must be recomputed — otherwise they'd fire
+// once at the stale wall-clock time. null = not yet initialized (first tick).
+let lastTickTz: string | null = null;
 
 /** Owner-filter state — each daemon process runs its own scheduler but only
  *  executes tasks whose larkAppId matches.  Legacy tasks without a larkAppId
@@ -212,7 +217,11 @@ export function parseSchedule(input: string): ParsedSchedule {
     }
   }
 
-  // ISO timestamp
+  // ISO timestamp. NOTE: a string WITH an explicit offset/Z is absolute; a bare
+  // `YYYY-MM-DDTHH:MM` (no offset) is parsed by JS in the HOST-local zone, NOT
+  // scheduleTimeZone() — this is deliberate (an explicit timestamp carries its
+  // own zone contract; we don't reinterpret it). Only the DISPLAY uses the
+  // effective zone. The NL「明天HH:MM」path (above) is the tz-aware one.
   if (/^\d{4}-\d{2}-\d{2}(T| |$)/.test(s)) {
     const dt = new Date(s);
     if (!isNaN(dt.getTime())) {
@@ -346,6 +355,15 @@ async function tick(): Promise<void> {
   const tasks = scheduleStore.listTasks();
   const now = Date.now();
 
+  // Re-align to a changed effective timezone before the fire loop.
+  const tz = scheduleTimeZone();
+  if (lastTickTz !== null && lastTickTz !== tz) {
+    const updates = planCronRealign(tasks, taskBelongsToThisDaemon);
+    for (const u of updates) scheduleStore.updateTask(u.id, { nextRunAt: u.nextRunAt });
+    logger.info(`[scheduler] schedule timezone ${lastTickTz} → ${tz}; recomputed ${updates.length} enabled cron next-run(s)`);
+  }
+  lastTickTz = tz;
+
   for (const task of tasks) {
     if (!task.enabled) continue;
     if (!taskBelongsToThisDaemon(task)) continue;
@@ -412,6 +430,28 @@ async function tick(): Promise<void> {
         });
     }
   }
+}
+
+/**
+ * Plan which enabled CRON tasks need their `nextRunAt` recomputed after the
+ * effective schedule timezone changed. CRON is the only tz-dependent kind
+ * (wall-clock); `interval` is a relative period and `once` is a fixed instant,
+ * so both are skipped. `computeNextRun()` returns the next FUTURE occurrence,
+ * so applying these updates never causes an immediate or duplicate fire.
+ * Pure (no store writes) → unit-testable; tick() applies the returned plan.
+ */
+export function planCronRealign(
+  tasks: ScheduledTask[],
+  belongs: (t: ScheduledTask) => boolean = () => true,
+): Array<{ id: string; nextRunAt: string }> {
+  const updates: Array<{ id: string; nextRunAt: string }> = [];
+  for (const task of tasks) {
+    if (!task.enabled || task.parsed.kind !== 'cron') continue;
+    if (!belongs(task)) continue;
+    const next = computeNextRun(task.parsed);
+    if (next && next !== task.nextRunAt) updates.push({ id: task.id, nextRunAt: next });
+  }
+  return updates;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────

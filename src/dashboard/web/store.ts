@@ -7,20 +7,33 @@ export interface StoreSnapshot {
   schedules: ReadonlyMap<string, Schedule>;
   online: boolean;
   version: number;
+  /** Effective schedule timezone (IANA) the scheduler fires in — used to render
+   *  schedule nextRunAt/lastRunAt in the SAME zone regardless of browser zone.
+   *  Empty ⇒ fall back to the browser's local zone (legacy behavior). */
+  scheduleTimeZone: string;
 }
 
 class Store {
   sessions = new Map<string, Session>();
   schedules = new Map<string, Schedule>();
   online = true;
+  scheduleTimeZone = '';
   private version = 0;
   private snapshot: StoreSnapshot = {
     sessions: this.sessions,
     schedules: this.schedules,
     online: this.online,
     version: this.version,
+    scheduleTimeZone: this.scheduleTimeZone,
   };
   private listeners = new Set<() => void>();
+
+  setScheduleTimeZone(tz: string) {
+    if (typeof tz === 'string' && tz && this.scheduleTimeZone !== tz) {
+      this.scheduleTimeZone = tz;
+      this.emit();
+    }
+  }
 
   upsertSessions(rows: Session[]) {
     for (const r of rows) this.sessions.set(r.sessionId, r);
@@ -63,6 +76,7 @@ class Store {
       schedules: this.schedules,
       online: this.online,
       version: this.version,
+      scheduleTimeZone: this.scheduleTimeZone,
     };
     for (const fn of this.listeners) fn();
   }
@@ -77,6 +91,7 @@ export async function bootstrap() {
   ]);
   store.upsertSessions(s.sessions ?? []);
   store.upsertSchedules(sch.schedules ?? []);
+  if (typeof sch.timezone === 'string') store.setScheduleTimeZone(sch.timezone);
 
   const es = new EventSource('/events');
   const types = [

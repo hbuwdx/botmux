@@ -74,11 +74,8 @@ export function scheduleTimeZone(): string {
 // 的换算。JS 原生只有 `Date.setHours()`（走主机本地时区），在非目标时区的主机上会算错。
 // 下面用 Intl.formatToParts 计算目标时区在给定瞬时的 UTC 偏移，纯函数、无第三方依赖。
 
-/**
- * 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处，需要「加到 UTC 上」得到当地墙上时间的偏移(ms)。
- * 即 `当地墙上时间ms = utcMs + tzOffsetMs(tz, utcMs)`（UTC 以东为正）。
- */
-function tzOffsetMs(tz: string, utcMs: number): number {
+/** 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处的当地墙上时间字段（年/月/日/时/分/秒）。 */
+function zonedParts(tz: string, utcMs: number): { year: number; month: number; day: number; hour: number; minute: number; second: number } {
   const dtf = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     hourCycle: 'h23',
@@ -89,14 +86,27 @@ function tzOffsetMs(tz: string, utcMs: number): number {
   for (const p of dtf.formatToParts(new Date(utcMs))) {
     if (p.type !== 'literal') f[p.type] = Number(p.value);
   }
+  return { year: f.year, month: f.month, day: f.day, hour: f.hour, minute: f.minute, second: f.second };
+}
+
+/**
+ * 目标时区 `tz` 在 UTC 瞬时 `utcMs` 处，需要「加到 UTC 上」得到当地墙上时间的偏移(ms)。
+ * 即 `当地墙上时间ms = utcMs + tzOffsetMs(tz, utcMs)`（UTC 以东为正）。
+ */
+function tzOffsetMs(tz: string, utcMs: number): number {
+  const f = zonedParts(tz, utcMs);
   // 把 tz 当地墙上字段「当作 UTC」拼回一个瞬时，与真实 utcMs 的差就是偏移。
-  const asIfUtc = Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second);
-  return asIfUtc - utcMs;
+  return Date.UTC(f.year, f.month - 1, f.day, f.hour, f.minute, f.second) - utcMs;
 }
 
 /**
  * 把「时区 `tz` 下的墙上时间 (year, month, day, hour, minute)」换算成对应的 UTC Date。
- * 用一次偏移修正处理 DST 边界（偏移在 guess 瞬时与结果瞬时不同的情形）。
+ *
+ * 偏移修正 + round-trip 校验，正确处理 DST 两类边界：
+ *  - **fall-back**（墙钟出现两次）：取第一个出现的瞬时（round-trip 通过）。
+ *  - **spring-forward**（墙钟不存在，如 LA 03-08 02:30）：两个候选都 round-trip 不回请求
+ *    的墙钟；回退到 `guess - o1`，即被推进到 gap 之后那一小时 —— 与 croner 的前向对齐一致，
+ *    保证一次性「明天HH:MM」与同表达式 cron 在换季日不再错位。
  */
 export function zonedWallClockToUtc(
   tz: string,
@@ -107,12 +117,16 @@ export function zonedWallClockToUtc(
   minute: number,
 ): Date {
   const guess = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
-  const offset = tzOffsetMs(tz, guess);
-  let utc = guess - offset;
-  // guess 与最终瞬时可能落在 DST 切换两侧、偏移不同 —— 再修正一次即收敛。
-  const offset2 = tzOffsetMs(tz, utc);
-  if (offset2 !== offset) utc = guess - offset2;
-  return new Date(utc);
+  const o1 = tzOffsetMs(tz, guess);
+  const utc1 = guess - o1;
+  const o2 = tzOffsetMs(tz, utc1);
+  if (o2 === o1) return new Date(utc1);
+  // 偏移在两个瞬时不同（贴近 DST 切换）。优先取能 round-trip 回请求墙钟的候选；
+  // spring-forward gap 两者都回不去 → 用 utc1（前向，匹配 croner）。
+  const utc2 = guess - o2;
+  const f = zonedParts(tz, utc2);
+  const matches = f.year === year && f.month === month && f.day === day && f.hour === hour && f.minute === minute;
+  return new Date(matches ? utc2 : utc1);
 }
 
 /**
