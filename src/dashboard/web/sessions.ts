@@ -40,6 +40,8 @@ import {
   type IdleCleanupHours,
 } from '../session-cleanup.js';
 import { CLI_OPTIONS } from '../../setup/bot-config-editor.js';
+import { addMonitorRoomSessionIds, monitorRoomUrl } from './monitor-room-store.js';
+import { sessionTerminalHref } from './session-terminal.js';
 
 function th(sort: string, label: string): string {
   return `<th data-sort="${sort}" data-label="${escapeHtml(label)}">${escapeHtml(label)}</th>`;
@@ -167,19 +169,7 @@ function sessionSearchText(s: any): string {
   return `${JSON.stringify(s)} ${sessionLocationText(s)} ${sessionLocationTitle(s)}`.toLowerCase();
 }
 
-function terminalHref(s: any): string | null {
-  if (!s.webPort) return null;
-  // 经中心化平台访问时（本页是 HTTPS 机器子域 m-<id>.<host>）：终端走**同源 /s/<session>**——
-  // 平台在 443 反代该路径 → 本机 dashboard → 本地终端。不能带 :port（平台只在 443 反代，:8801 打不通）。
-  // 需要本地终端反代口(proxyPort)已起；没起则平台侧无法反代，返回 null 不给死链。
-  if (location.protocol === 'https:') {
-    return s.proxyPort ? `${location.origin}/s/${encodeURIComponent(s.sessionId)}` : null;
-  }
-  // 本地直连：http://host:port[/s/...]
-  const port = s.proxyPort ?? s.webPort;
-  const suffix = s.proxyPort ? `/s/${encodeURIComponent(s.sessionId)}` : '';
-  return `http://${location.hostname}:${port}${suffix}`;
-}
+export const terminalHref = sessionTerminalHref;
 
 // Cohesive icon set for the session-card action bar — stroke-based (CSS sets
 // stroke:currentColor), 16px viewBox to match the sidebar nav glyphs. Icons
@@ -324,6 +314,7 @@ function pageHtml(): string {
           <button type="button" data-view="board">${t('sessions.viewBoard')}</button>
           <button type="button" data-view="table">${t('sessions.viewTable')}</button>
         </div>
+        <button type="button" id="monitor-room-open" class="monitor-room-open">${t('sessions.monitorRoom')}</button>
       </div>
     </div>
     <form id="filters" class="filters sessions-filters">
@@ -360,6 +351,7 @@ function pageHtml(): string {
     </div>
     <div id="bulk-bar" class="bulk-bar" hidden>
       <span id="bulk-count"></span>
+      <button type="button" id="bulk-monitor-room">${t('sessions.addToMonitorRoom')}</button>
       <button type="button" id="bulk-lock">${t('sessions.lockSelected')}</button>
       <button type="button" id="bulk-unlock">${t('sessions.unlockSelected')}</button>
       <button type="button" id="bulk-close" class="contrast">${t('sessions.closeSelected')}</button>
@@ -582,6 +574,7 @@ export function wireSessionsPage(root: HTMLElement): () => void {
   const selectAllBox = root.querySelector<HTMLInputElement>('#select-all')!;
   const bulkBar = root.querySelector<HTMLElement>('#bulk-bar')!;
   const bulkCountSpan = root.querySelector<HTMLElement>('#bulk-count')!;
+  const bulkMonitorRoomBtn = root.querySelector<HTMLButtonElement>('#bulk-monitor-room')!;
   const bulkLockBtn = root.querySelector<HTMLButtonElement>('#bulk-lock')!;
   const bulkUnlockBtn = root.querySelector<HTMLButtonElement>('#bulk-unlock')!;
   const bulkCloseBtn = root.querySelector<HTMLButtonElement>('#bulk-close')!;
@@ -600,6 +593,7 @@ export function wireSessionsPage(root: HTMLElement): () => void {
   const teamSelect = root.querySelector<HTMLSelectElement>('#kanban-team')!;
   const teamStats = root.querySelector<HTMLElement>('#kanban-team-stats')!;
   const viewButtons = root.querySelectorAll<HTMLButtonElement>('.sessions-view-toggle [data-view]');
+  const monitorRoomOpenBtn = root.querySelector<HTMLButtonElement>('#monitor-room-open')!;
   // 「创建会话」按钮 + 弹窗已提到全局顶栏，由 wireCreateSessionButton() 一次性接线（见 app.ts）。
 
   const selected = new Set<string>();
@@ -1595,6 +1589,7 @@ export function wireSessionsPage(root: HTMLElement): () => void {
     const selectedRows = [...selected]
       .map(id => store.sessions.get(id))
       .filter((r): r is any => !!r && r.status !== 'closed');
+    bulkMonitorRoomBtn.disabled = selectedRows.length === 0;
     bulkLockBtn.disabled = !selectedRows.some(r => !r.locked);
     bulkUnlockBtn.disabled = !selectedRows.some(r => !!r.locked);
     const selectable = rows.filter(r => r.status !== 'closed');
@@ -2187,6 +2182,10 @@ export function wireSessionsPage(root: HTMLElement): () => void {
     });
   });
 
+  monitorRoomOpenBtn.addEventListener('click', () => {
+    window.location.href = monitorRoomUrl();
+  });
+
   groupByBox.querySelectorAll<HTMLButtonElement>('[data-groupby]').forEach(btn => {
     btn.addEventListener('click', () => {
       const raw = btn.dataset.groupby;
@@ -2413,6 +2412,16 @@ export function wireSessionsPage(root: HTMLElement): () => void {
   bulkClearBtn.addEventListener('click', () => {
     selected.clear();
     rerender();
+  });
+
+  bulkMonitorRoomBtn.addEventListener('click', () => {
+    const ids = [...selected].filter(id => !!store.sessions.get(id));
+    const result = addMonitorRoomSessionIds(ids);
+    const original = bulkMonitorRoomBtn.textContent;
+    bulkMonitorRoomBtn.textContent = t('sessions.monitorRoomAdded', { added: result.added, total: result.total });
+    window.setTimeout(() => {
+      bulkMonitorRoomBtn.textContent = original;
+    }, 1800);
   });
 
   bulkCloseBtn.addEventListener('click', async () => {
