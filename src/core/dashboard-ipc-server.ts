@@ -1547,10 +1547,14 @@ ipcRoute('PUT', '/api/bot-substitute-mode', async (req, res) => {
     rec.targets,
     { resolveRaw: resolveAllowedUsersWithMap, getProfile: getUserProfile },
   );
+  const chats = Array.isArray(rec.chats)
+    ? [...new Set(rec.chats.map(String).map(s => s.trim()).filter(Boolean))]
+    : [];
   const r = await substituteModeStore.updateBotSubstituteMode(cachedLarkAppId, {
     enabled: rec.enabled === true,
     targets,
     disclosure: rec.disclosure === 'none' ? 'none' : 'prefix',
+    ...(chats.length ? { chats } : {}),
   });
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason, resolution });
   jsonRes(res, 200, { ok: true, substituteMode: r.substituteMode, resolution });

@@ -18,13 +18,13 @@ export async function updateBotSubstituteMode(
 ): Promise<{ ok: true; substituteMode: SubstituteModeConfig | null } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
-  const normalized = normalizeSubstituteMode(raw);
-  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-    const enabled = (raw as Record<string, unknown>).enabled;
-    const targets = (raw as Record<string, unknown>).targets;
-    if (enabled === true && (!Array.isArray(targets) || targets.length === 0 || !normalized)) {
-      return { ok: false, reason: 'targets_required' };
-    }
+  const rec = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const chats = Array.isArray(rec.chats)
+    ? [...new Set(rec.chats.map(String).map(s => s.trim()).filter(Boolean))]
+    : [];
+  const normalized = normalizeSubstituteMode({ ...rec, chats: chats.length ? chats : undefined });
+  if (rec.enabled === true && (!Array.isArray(rec.targets) || rec.targets.length === 0 || !normalized)) {
+    return { ok: false, reason: 'targets_required' };
   }
 
   const r = await rmwBotEntry<SubstituteModeConfig | null>(larkAppId, (entry) => {

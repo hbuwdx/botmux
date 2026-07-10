@@ -26,6 +26,7 @@ export type BotSubstituteMode = {
   enabled: boolean;
   targets: BotSubstituteTarget[];
   disclosure: 'prefix' | 'none';
+  chats?: string[];
 };
 
 export type BotDefaultsRow = {

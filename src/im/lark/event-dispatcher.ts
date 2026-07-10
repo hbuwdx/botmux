@@ -990,6 +990,11 @@ export function resolveSubstituteTrigger(
   return undefined;
 }
 
+function isSubstituteAllowedChat(cfg: { chats?: string[] } | undefined, chatId: string): boolean {
+  if (!cfg?.chats?.length) return true;
+  return cfg.chats.includes(chatId);
+}
+
 function mentionMatchesBot(m: any, larkAppId: string, botOpenId?: string): boolean {
   const openId = mentionOpenId(m);
   if (botOpenId && openId === botOpenId) return true;
@@ -2065,10 +2070,12 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // Cheap in-memory gate FIRST: skip the getChatMode roundtrip and the
         // per-chat toggle disk read entirely for bots that never configured a
         // substitute target (the overwhelming majority on the hot path).
-        let substituteTrigger = getBot(larkAppId).config.substituteMode?.enabled === true
+        const substituteCfg = getBot(larkAppId).config.substituteMode;
+        let substituteTrigger = substituteCfg?.enabled === true
           && chatType === 'group'
           && await getChatMode(larkAppId, chatId) === 'group'
           && isSubstituteEnabledForChat(larkAppId, chatId)
+          && isSubstituteAllowedChat(substituteCfg, chatId)
           ? resolveSubstituteTrigger(larkAppId, message)
           : undefined;
         if (substituteTrigger && !explicitlyMentionedThisBot) {

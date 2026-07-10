@@ -117,6 +117,31 @@ describe('substitute-mode store', () => {
     expect(registry.getBot('app_default').config.substituteMode).toBeUndefined();
   });
 
+  it('persists and normalizes allowed chat whitelist', async () => {
+    writeConfig();
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    const r = await store.updateBotSubstituteMode('app_default', {
+      enabled: true,
+      disclosure: 'prefix',
+      targets: [{ openId: 'ou_alice', name: 'Alice' }],
+      chats: ['oc_a', ' oc_b ', '', 'oc_a'],
+    });
+
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.substituteMode).toMatchObject({
+        enabled: true,
+        disclosure: 'prefix',
+        targets: [{ openId: 'ou_alice', name: 'Alice' }],
+        chats: ['oc_a', 'oc_b'],
+      });
+    }
+    expect(registry.getBot('app_default').config.substituteMode?.chats).toEqual(['oc_a', 'oc_b']);
+    expect(readConfig().substituteMode.chats).toEqual(['oc_a', 'oc_b']);
+  });
+
   it('rejects enabled mode without a matchable target', async () => {
     writeConfig();
     const { registry, store } = await freshModules();

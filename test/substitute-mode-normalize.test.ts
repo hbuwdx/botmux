@@ -1,0 +1,44 @@
+import { describe, expect, it } from 'vitest';
+import { normalizeSubstituteMode } from '../src/services/substitute-mode-normalize.js';
+
+describe('normalizeSubstituteMode', () => {
+  it('returns undefined for empty / non-object inputs', () => {
+    expect(normalizeSubstituteMode(undefined)).toBeUndefined();
+    expect(normalizeSubstituteMode(null)).toBeUndefined();
+    expect(normalizeSubstituteMode([])).toBeUndefined();
+    expect(normalizeSubstituteMode('')).toBeUndefined();
+  });
+
+  it('normalizes and deduplicates the chats whitelist', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+      disclosure: 'prefix',
+      chats: ['oc_a', ' oc_b ', '', 'oc_a', 'oc_b'],
+    });
+    expect(cfg).toMatchObject({
+      enabled: true,
+      disclosure: 'prefix',
+      targets: [{ openId: 'ou_alice' }],
+      chats: ['oc_a', 'oc_b'],
+    });
+  });
+
+  it('omits chats when the list is empty', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+      chats: [],
+    });
+    expect(cfg).not.toHaveProperty('chats');
+  });
+
+  it('omits chats when not an array', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+      chats: 'oc_a',
+    });
+    expect(cfg).not.toHaveProperty('chats');
+  });
+});

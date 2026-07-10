@@ -41,9 +41,14 @@ export function normalizeSubstituteMode(raw: unknown): SubstituteModeConfig | un
   const hasMatchableTarget = targets.some(t => t.openId || t.userId || t.unionId);
   // Enabling with no matchable id is a dead ON state — reject (undefined).
   if (enabled && !hasMatchableTarget) return undefined;
-  return {
+  const chats = Array.isArray(rec.chats)
+    ? [...new Set(rec.chats.map(String).map(s => s.trim()).filter(Boolean))]
+    : [];
+  const out: SubstituteModeConfig = {
     enabled,
     targets,
     disclosure: rec.disclosure === 'none' ? 'none' : 'prefix',
   };
+  if (chats.length) out.chats = chats;
+  return out;
 }

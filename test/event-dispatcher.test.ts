@@ -185,6 +185,7 @@ function setupBotState(opts?: {
 	    enabled: boolean;
 	    targets: Array<{ openId?: string; userId?: string; unionId?: string; name?: string }>;
 	    disclosure?: 'prefix' | 'none';
+	    chats?: string[];
 	  };
 	}) {
   mockGetBot.mockReturnValue({
@@ -2035,6 +2036,52 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     });
 
     await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('substituteMode: chat whitelist allows @substitute only in listed chats', async () => {
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      substituteMode: {
+        enabled: true,
+        targets: [{ openId: 'ou_sub', name: 'Sub Person' }],
+        chats: ['chat-allowed'],
+      },
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.isSessionOwner.mockReturnValue(false);
+    const allowedEvent = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-allowed',
+      chatId: 'chat-allowed',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](allowedEvent);
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(allowedEvent, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-allowed',
+      substituteTrigger: expect.objectContaining({ target: expect.objectContaining({ openId: 'ou_sub' }) }),
+    }));
+    handlers.handleNewTopic.mockClear();
+
+    const deniedEvent = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-denied-chat',
+      chatId: 'chat-other',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { open_id: 'ou_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](deniedEvent);
     await flushEventWork();
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();

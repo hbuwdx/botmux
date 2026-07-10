@@ -379,6 +379,8 @@ export interface SubstituteModeConfig {
   targets: SubstituteTarget[];
   /** prefix = disclose "I will answer on behalf of X"; none = no extra disclosure instruction. */
   disclosure?: 'prefix' | 'none';
+  /** Optional allow-list of chat IDs. When provided, substitute trigger only fires in these chats. */
+  chats?: string[];
 }
 
 export interface VcMeetingAgentConfig {
