@@ -1749,6 +1749,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // getSessionPersistentBackendType). A brand-new session (no stamp) resolves
     // from live config, so a dashboard backend switch only affects NEW sessions.
     backendType: resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType),
+    backendConfig: botCfg.riff,
     prompt,
     resume,
     cliSessionId: ds.session.cliSessionId,
