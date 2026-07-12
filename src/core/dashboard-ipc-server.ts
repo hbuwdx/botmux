@@ -1592,6 +1592,7 @@ ipcRoute('PUT', '/api/bot-substitute-mode', async (req, res) => {
     targets,
     disclosure: rec.disclosure === 'none' ? 'none' : 'prefix',
     replyMode: rec.replyMode === 'quote' ? 'quote' : 'thread',
+    disableControlCard: rec.disableControlCard === true,
     ...(chats.length ? { chats } : {}),
   });
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason, resolution });
