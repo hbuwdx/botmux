@@ -4,6 +4,7 @@
  * Extracted from daemon.ts for modularity.
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
+import { ProxyAgent } from 'proxy-agent';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { join } from 'node:path';
@@ -1851,6 +1852,32 @@ async function processCommentEvent(
   });
 }
 
+const LARK_WS_PROXY_ENV_KEYS = [
+  'npm_config_https_proxy',
+  'NPM_CONFIG_HTTPS_PROXY',
+  'https_proxy',
+  'HTTPS_PROXY',
+  'npm_config_proxy',
+  'NPM_CONFIG_PROXY',
+  'all_proxy',
+  'ALL_PROXY',
+] as const;
+
+function createLarkWsAgent(): ProxyAgent | undefined {
+  const hasSecureProxy = LARK_WS_PROXY_ENV_KEYS.some(key => process.env[key]?.trim());
+  if (!hasSecureProxy) return undefined;
+
+  const agent = new ProxyAgent();
+  const resolveEnvProxy = agent.getProxyForUrl;
+  agent.getProxyForUrl = (url, req) => {
+    const target = new URL(url);
+    if (target.protocol === 'wss:') target.protocol = 'https:';
+    else if (target.protocol === 'ws:') target.protocol = 'http:';
+    return resolveEnvProxy(target.href, req);
+  };
+  return agent;
+}
+
 /**
  * Create and start the Lark WSClient with event dispatching.
  * Returns the WSClient instance for lifecycle management.
@@ -2508,6 +2535,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     appSecret: larkAppSecret,
     // brand → 长连接域名。国际版租户必须连 larksuite.com，否则收不到任何事件。
     domain: sdkDomain(brand),
+    // `proxy-from-env` treats WSS_PROXY as distinct from HTTPS_PROXY, while
+    // Lark's preceding Axios bootstrap request uses HTTPS proxy semantics.
+    // The custom resolver keeps both phases aligned and still honors NO_PROXY.
+    agent: createLarkWsAgent(),
     // Default to warn — the SDK is chatty at info ("client ready", reconnect
     // heartbeats, etc.) and floods pm2 error.log when stderr is the only sink.
     // DEBUG=1 widens the level back to info for troubleshooting.
