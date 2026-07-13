@@ -39,6 +39,33 @@ describe('renderBrandTemplate', () => {
     }
   });
 
+  // ── codex review 抓出的 4 条（均已复现）──────────────────────────────
+  it('name/url 是不可信输入：剥离 []、换行，拒绝非 http(s) 与含 ) 的 url（防卡片注入）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-inj-'));
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({
+      name: 'role]\n**伪造正文**',
+      url: 'https://safe.example/x) 后续正文',
+    }));
+    const out = renderBrandTemplate('[{cwdName}]({cwdUrl})', dir)!;
+    expect(out).not.toContain('**伪造正文**]');   // 链接文本没被击穿
+    expect(out).not.toContain('\n');
+    expect(out).toBe('role **伪造正文**');          // url 非法 → 丢弃 → 空链接降级成纯文本
+  });
+
+  it('javascript: 等危险 scheme 一律丢弃', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-js-'));
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'x', url: 'javascript:alert(1)' }));
+    expect(renderBrandTemplate('[{cwdName}]({cwdUrl})', dir)).toBe('x');
+  });
+
+  it('workingDir 恰好是 `~` 时，{cwdName} 取 home 的 basename 而不是字面量 ~', () => {
+    expect(renderBrandTemplate('{cwdName}', '~')).toBe(basename(homedir()));
+  });
+
+  it('{cwd} 输出展开后的绝对路径，不是字面量 ~/...', () => {
+    expect(renderBrandTemplate('{cwd}', '~/foo')).toBe(join(homedir(), 'foo'));
+  });
+
   it('url 缺失时空链接降级为纯文本', () => {
     const dir = mkdtempSync(join(tmpdir(), 'brand-'));
     expect(renderBrandTemplate('[{cwdName}]({cwdUrl})', dir)).toBe(basename(dir));
