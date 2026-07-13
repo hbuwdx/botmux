@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -74,6 +74,26 @@ describe('renderBrandTemplate', () => {
 
   it('{cwd} 输出展开后的绝对路径，不是字面量 ~/...', () => {
     expect(renderBrandTemplate('{cwd}', '~/foo')).toBe(join(homedir(), 'foo'));
+  });
+
+  // ── codex 复验抓出的 2 条残留 ────────────────────────────────────────
+  it('变量落在 URL 位时也安全：路径里的 ) 不能提前闭合链接', () => {
+    // brandLabel 是用户可配的，{cwd} 完全可能被放进 URL 位；而目录名可以含 `)`。
+    const dir = mkdtempSync(join(tmpdir(), 'brand-paren-'));
+    const evil = join(dir, 'a) **spoof**');
+    mkdirSync(evil);
+    const out = renderBrandTemplate('[repo]({cwd})', evil)!;
+    expect(out).not.toContain(') **spoof**');   // 没有提前闭合
+    expect(out.endsWith(')')).toBe(true);
+    expect((out.match(/\)/g) ?? []).length).toBe(1);  // 只有结尾那一个 )
+  });
+
+  it('name 按码点截断，不切坏 emoji', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-emoji-'));
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'a'.repeat(63) + '😀' }));
+    const out = renderBrandTemplate('{cwdName}', dir)!;
+    expect(out.endsWith('😀')).toBe(true);      // 完整的 emoji，不是半个代理对
+    expect(out).not.toContain('\uFFFD');
   });
 
   it('url 缺失时空链接降级为纯文本', () => {

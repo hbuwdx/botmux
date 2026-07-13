@@ -47,19 +47,31 @@ export function readDirMeta(workingDir: string): DirMeta {
 function safeName(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const s = safeText(v).trim();
-  return s ? s.slice(0, 64) : undefined;
+  // 按**码点**截断：slice(0,64) 是 UTF-16 code unit，会把 emoji 切成半个代理对。
+  return s ? Array.from(s).slice(0, 64).join('') : undefined;
 }
 
-/** 链接文本位的通用消毒：剥离 `[` `]` 与换行（两者都能击穿 `[text](url)`）。 */
+/**
+ * 通用消毒。**模板是用户可配的，我们无法预知某个变量会落在链接的文本位还是 URL 位**
+ * （`[{cwdName}]({cwdUrl})` vs `[repo]({cwd})` 都是合法写法），所以每个值必须对**两种位置
+ * 都安全**：
+ *   - 文本位的杀手：`[` `]` 与换行  → 击穿 `[text](...)`
+ *   - URL 位的杀手：`(` `)` 与空白 → 提前闭合 `(...)`，把后面的内容抖进正文
+ * 因此一律剥离 `[ ] ( )` 与换行。代价是角色名里的括号会被丢掉（"客服(测试)" → "客服测试"），
+ * 这是有意的取舍：宁可掉个括号，也不能让磁盘/路径里的字符串击穿卡片。
+ */
 function safeText(s: string): string {
-  return s.replace(/[\r\n]+/g, ' ').replace(/[[\]]/g, '');
+  return s.replace(/[\r\n]+/g, ' ').replace(/[[\]()]/g, '');
 }
 
-/** 只放行 http/https，且不得含空白或 `)`（会提前闭合 markdown 链接）。其余一律丢弃 → 链接降级成纯文本。 */
+/**
+ * URL 位：只放行 http/https，且不得含空白、`(`/`)`（闭合 URL）或 `[`/`]`（万一被塞进文本位）。
+ * 其余一律丢弃 → 走既有的空链接降级成纯文本。
+ */
 function safeUrl(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const s = v.trim();
-  return /^https?:\/\/[^\s)<>"'`]+$/i.test(s) ? s : undefined;
+  return /^https?:\/\/[^\s()[\]<>"'`]+$/i.test(s) ? s : undefined;
 }
 
 /**
