@@ -138,6 +138,23 @@ describe('renderBrandTemplate', () => {
     expect(out).not.toMatch(/(?<!\\)(?:\\\\)*\*/);  // 没有「偶数反斜杠 + 裸 *」
   });
 
+  it('截断不切断转义序列：末尾不留落单反斜杠（会转义模板的 ]）', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-trunc-'));
+    // name 恰好 64 码点、末尾是需转义的 * → 先转义后截断会把 \* 切成落单 \
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({
+      name: 'a'.repeat(63) + '*', url: 'https://x.feishu.cn/docx/abc',
+    }));
+    const out = renderBrandTemplate('[{cwdName}]({cwdUrl})', dir)!;
+    expect(out).toContain('](https://x.feishu.cn/docx/abc)');  // 链接结构完好，] 没被 \ 转义吃掉
+    expect(out.split('](')[0]).not.toMatch(/\\$/);           // 文本位末尾不是落单反斜杠
+  });
+
+  it('safeUrl 挡掉 https://// 归一混淆', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'brand-slash-'));
+    writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'x', url: 'https:////evil.example' }));
+    expect(renderBrandTemplate('[{cwdName}]({cwdUrl})', dir)).toBe('x');  // 丢弃 → 降级
+  });
+
   it('name 按码点截断，不切坏 emoji', () => {
     const dir = mkdtempSync(join(tmpdir(), 'brand-emoji-'));
     writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'a'.repeat(63) + '😀' }));

@@ -46,9 +46,12 @@ export function readDirMeta(workingDir: string): DirMeta {
  */
 function safeName(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
-  const s = safeText(v).trim();
-  // 按**码点**截断：slice(0,64) 是 UTF-16 code unit，会把 emoji 切成半个代理对。
-  return s ? Array.from(s).slice(0, 64).join('') : undefined;
+  // **先按码点截断，再转义** —— 顺序很关键：反过来（先转义后截断）会把 `\*` 这类转义序列
+  // 从中间切开，留下一个落单的 `\`，它会转义掉模板里紧跟的 `]`/`)`，破坏链接结构。
+  // Array.from 按码点切，也顺带避免把 emoji 切成半个代理对。
+  const truncated = Array.from(v).slice(0, 64).join('');
+  const s = safeText(truncated).trim();
+  return s || undefined;
 }
 
 /**
@@ -78,13 +81,17 @@ function safeText(s: string): string {
  *   - 空白 / `(` `)` / `[` `]` / `<` `>` / 引号反引号 → 闭合链接或注入文本位
  *   - `\` → 在 markdown 里转义掉模板的闭合 `)`
  *   - `@` → userinfo 钓鱼形态 `https://trusted@evil.example/…`（真实 host 是 @ 后面那个）
+ *   - host 位（`://` 之后第一个字符）不得再是 `/` → 挡掉 `https:////evil` 归一到 evil 的混淆
  * 用途上这里的 url 只会是飞书知识文档链接（`.../docx/TOKEN`），本就不含上述字符，收紧无副作用。
  * 不合规一律丢弃 → 走既有的空链接降级成纯文本。
+ *
+ * 已知不处理：IDN/punycode 同形字钓鱼（`https://аррӏе.example`）—— 那是视觉混淆而非结构击穿，
+ * 且这里的 url 是 bot 自建知识文档的链接（半可信），不做 IDN 归一。
  */
 function safeUrl(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const s = v.trim();
-  return /^https?:\/\/[^\s()[\]<>"'`\\@]+$/i.test(s) ? s : undefined;
+  return /^https?:\/\/[^\s/()[\]<>"'`\\@][^\s()[\]<>"'`\\@]*$/i.test(s) ? s : undefined;
 }
 
 /**
