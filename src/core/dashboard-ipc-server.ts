@@ -119,7 +119,6 @@ import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle }
 import { validateSlashInjection } from './slash-inject.js';
 import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
-import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, Session } from '../types.js';
 import type { DaemonSession } from './types.js';
