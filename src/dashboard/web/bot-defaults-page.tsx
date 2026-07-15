@@ -823,7 +823,9 @@ export function BotAgentSection(props: {
     try {
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, { cliId: cliKey, model });
       if (res.ok && res.body.ok) {
-        setAgentStatus({ text: `✓ ${tr('botDefaults.agentSaved')}`, ok: true });
+        setAgentStatus(res.body.availabilityWarning
+          ? { text: `⚠️ ${res.body.availabilityWarning}` }
+          : { text: `✓ ${tr('botDefaults.agentSaved')}`, ok: true });
         patchBot(bot.larkAppId, {
           cliId: res.body.cliId,
           wrapperCli: res.body.wrapperCli ?? null,
@@ -890,7 +892,9 @@ export function BotAgentSection(props: {
   const siSupport = bot.skillInjectionSupport === 'dynamic' ? 'dynamic' : bot.skillInjectionSupport === 'global' ? 'global' : 'none';
   const cliOptions = cliState.options.map(option => ({
     value: option.id,
-    label: `${option.label}（${option.id}）`,
+    label: option.available === false
+      ? tr('botDefaults.agentMissingOption', { label: option.label, command: option.command ?? option.id })
+      : `${option.label}（${option.id}）`,
   }));
   const dynamicSkillOptions = [
     { value: 'dynamic', label: tr('botDefaults.skillInjectionDynamic') },
@@ -919,6 +923,11 @@ export function BotAgentSection(props: {
             options={cliOptions}
             onChange={updateCli}
           />
+          {option?.available === false ? (
+            <small className="hint-warn">
+              {tr('botDefaults.agentMissingHint', { command: option.command ?? cliKey })}
+            </small>
+          ) : null}
         </div>
       </div>
       {!isRiff && (

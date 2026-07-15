@@ -88,6 +88,7 @@ import { triggerWorkflowFromEnvelope } from '../workflows/trigger-from-envelope.
 import type { TriggerInput, TriggerResult } from '../workflows/trigger-run.js';
 import { validateTriggerRequest, type TriggerResponse } from '../services/trigger-types.js';
 import { resolveCliSelection, selectionKeyForBot } from '../setup/cli-selection.js';
+import { checkCliAvailability } from '../setup/cli-availability.js';
 import { enrichHistorySenders, type HistoryBotInfo } from '../dashboard/history-senders.js';
 
 // Workflow runner is wired by the daemon (it owns the heavy triggerWorkflowRun
@@ -1794,6 +1795,18 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     return jsonRes(res, 400, { ok: false, error: 'invalid_cli', message: err?.message ?? String(err) });
   }
   const model = typeof body.model === 'string' ? body.model.trim() : '';
+  const currentBotConfig = getBot(cachedLarkAppId).config;
+  const availability = checkCliAvailability({
+    cliId: selected.cliId,
+    wrapperCli: selected.wrapperCli,
+    cliPathOverride: currentBotConfig.cliPathOverride,
+  });
+  // Existing Bot edits remain saveable (operators may intentionally configure
+  // first and install second), but the response is explicit so Dashboard never
+  // claims a missing Agent was saved successfully without qualification.
+  const availabilityWarning = availability.available
+    ? undefined
+    : `配置已保存，但所选 Agent 当前无法启动：${availability.reason ?? '本地启动依赖不可用'}。请先在 daemon 所在机器安装或修正 PATH / CLI 路径。`;
 
   // If the new CLI/wrapper can no longer enforce a currently-on read isolation,
   // auto-clear the flag here so the next session doesn't fail-close on it. (The
@@ -1854,6 +1867,9 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     readIsolation: bot.config.readIsolation === true,
     readIsolationSupported: readIsolationEnforceableFor(bot.config),
     readIsolationCleared,
+    agentAvailable: availability.available,
+    availabilityWarning,
+    requiredCommand: availability.command,
   });
 });
 

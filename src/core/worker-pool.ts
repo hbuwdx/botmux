@@ -64,6 +64,11 @@ import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cl
 
 type WindowsForkOptions = ForkOptions & { windowsHide?: boolean };
 
+type WorkerStartupState = {
+  ready: boolean;
+  failureNotified: boolean;
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const WORKER_SIGTERM_BACKSTOP_MS = 2_000;
@@ -1775,11 +1780,29 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
       LARK_APP_SECRET: botCfg.larkAppSecret,
     },
   } as WindowsForkOptions);
+  const startupState: WorkerStartupState = { ready: false, failureNotified: false };
 
   // A fork-level failure (spawn ENOENT, etc.) emits 'error'; without a handler
-  // the unhandled event crashes the daemon. Log and move on.
+  // the unhandled event crashes the daemon. It also happens before worker IPC
+  // exists, so this daemon-side branch must be the user-visible fallback.
   worker.on('error', (err) => {
-    logger.error(`[${t}] Worker fork error: ${(err as Error)?.message ?? err}`);
+    const reason = (err as Error)?.message ?? String(err);
+    logger.error(`[${t}] Worker fork error: ${reason}`);
+    if (startupState.failureNotified) return;
+    startupState.failureNotified = true;
+    const cliName = getCliDisplayName(agentCfg.cliId);
+    const message = tr('worker.start_failed', { cliName, reason }, botLocale(botCfg));
+    emitSessionLifecycleHook(ds, 'session.requires_attention', {
+      reason: 'worker_fork_error',
+      message: reason,
+    });
+    void cb.sessionReply(
+      sessionAnchorId(ds),
+      message,
+      'text',
+      ds.larkAppId,
+      fallbackTurnId(ds, initTurnId),
+    ).catch(replyErr => logger.error(`[${t}] Failed to deliver worker fork error to Lark: ${replyErr}`));
   });
 
   // Pipe worker stdout/stderr to daemon logger.
@@ -1886,7 +1909,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
   }
 
   // Use shared handler for IPC messages and exit
-  setupWorkerHandlers(ds, worker);
+  setupWorkerHandlers(ds, worker, startupState);
 
   ds.worker = worker;
   ds.spawnedAt = Date.now();
@@ -1918,7 +1941,11 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
 
 // ─── Shared worker IPC handler ──────────────────────────────────────────────
 
-function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
+function setupWorkerHandlers(
+  ds: DaemonSession,
+  worker: ChildProcess,
+  startupState: WorkerStartupState = { ready: false, failureNotified: false },
+): void {
   const cb = requireCallbacks();
   const t = tag(ds);
   // Source authorization belongs to one worker lifetime. A replacement worker
@@ -1935,6 +1962,21 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
   const loc = botLocale(botCfg);
+  const notifyStartupFailure = async (reason: string, turnId?: string): Promise<void> => {
+    if (startupState.failureNotified) return;
+    startupState.failureNotified = true;
+    const cliName = getCliDisplayName(sessionCliId(ds, botCfg));
+    const message = tr('worker.start_failed', { cliName, reason }, loc);
+    emitSessionLifecycleHook(ds, 'session.requires_attention', {
+      reason: 'worker_start_failed',
+      message: reason,
+    });
+    try {
+      await scopedReply(message, 'text', turnId);
+    } catch (err: any) {
+      logger.error(`[${t}] Failed to deliver worker startup failure to Lark: ${err?.message ?? err}`);
+    }
+  };
 
   // Adopt mode flags — computed once, used in all buildStreamingCard calls.
   // Bridge mode (the v3 default for /adopt) hides the legacy takeover button.
@@ -1945,6 +1987,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
     const effectiveCliId = sessionCliId(ds, botCfg);
     switch (msg.type) {
       case 'ready': {
+        startupState.ready = true;
         ds.workerPort = msg.port;
         ds.workerToken = msg.token;
         // Persist port so it can be reused after daemon restart
@@ -2588,6 +2631,10 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
       case 'error': {
         logger.error(`[${t}] Worker error: ${msg.message}`);
+        // `error` is a fatal launch-generation signal. It normally arrives
+        // during init, but can also follow a previously-ready worker whose CLI
+        // recovery/restart fails; that later failure must remain user-visible.
+        await notifyStartupFailure(msg.message, msg.turnId);
         break;
       }
 
@@ -2717,6 +2764,14 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
 
   worker.on('exit', (code) => {
     logger.info(`[${t}] Worker process exited (code: ${code})`);
+    // Last-resort startup guard: syntax/import crashes and abrupt exits can
+    // happen before the worker sends either ready or a structured error.  Do
+    // not leave the originating Lark message unanswered. Intentional close /
+    // replacement kills are excluded to avoid noisy false alarms.
+    if (!startupState.ready && !startupState.failureNotified && !worker.killed && ds.session.status !== 'closed') {
+      const reason = tr('worker.start_exited_early', { code: code ?? 'null' }, loc);
+      void notifyStartupFailure(reason);
+    }
     // Only clear ds.worker if it's still THIS worker — during takeover,
     // the old worker's exit fires AFTER the new worker has been assigned.
     if (ds.worker === worker) {
@@ -3009,10 +3064,31 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
       LARK_APP_SECRET: botCfg.larkAppSecret,
     },
   } as WindowsForkOptions);
+  const startupState: WorkerStartupState = { ready: false, failureNotified: false };
 
   // A fork-level failure emits 'error'; without a handler it crashes the daemon.
+  // Adopt has no worker IPC in this case either, so reply from the daemon just
+  // like the normal-session fork guard.
   worker.on('error', (err) => {
-    logger.error(`[${t}] Adopt worker fork error: ${(err as Error)?.message ?? err}`);
+    const reason = (err as Error)?.message ?? String(err);
+    logger.error(`[${t}] Adopt worker fork error: ${reason}`);
+    if (startupState.failureNotified) return;
+    startupState.failureNotified = true;
+    const message = tr('worker.start_failed', {
+      cliName: getCliDisplayName((adopted.cliId ?? 'claude-code') as CliId),
+      reason,
+    }, botLocale(botCfg));
+    emitSessionLifecycleHook(ds, 'session.requires_attention', {
+      reason: 'worker_fork_error',
+      message: reason,
+    });
+    void cb.sessionReply(
+      sessionAnchorId(ds),
+      message,
+      'text',
+      ds.larkAppId,
+      fallbackTurnId(ds, undefined),
+    ).catch(replyErr => logger.error(`[${t}] Failed to deliver adopt worker fork error to Lark: ${replyErr}`));
   });
 
   // Pipe worker stdout/stderr — both go through logger.info (→ daemon.log,
@@ -3136,7 +3212,7 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   }
 
   // Use shared handler
-  setupWorkerHandlers(ds, worker);
+  setupWorkerHandlers(ds, worker, startupState);
 
   ds.worker = worker;
   ds.spawnedAt = Date.now();

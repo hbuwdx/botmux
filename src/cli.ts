@@ -49,6 +49,7 @@ import {
   type BotConfigEditInput,
 } from './setup/bot-config-editor.js';
 import { resolveCliSelection, selectionKeyForBot } from './setup/cli-selection.js';
+import { checkCliAvailability, hasAgentLaunchConfigChanged } from './setup/cli-availability.js';
 import { resolveSetupAppName } from './setup/app-name.js';
 import {
   buildBotFromAddFlags,
@@ -992,6 +993,11 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     console.log('   不写 bots.json。请重新运行 botmux setup。');
     return null;
   }
+  const cliAvailability = checkCliAvailability({ cliId, wrapperCli });
+  if (!cliAvailability.available) {
+    console.log(`\n⚠️  所选 Agent 当前无法启动：${cliAvailability.reason ?? '本地启动依赖不可用'}`);
+    console.log('   配置仍可继续；请在 daemon 所在机器安装或修正 PATH / CLI 路径后再启动 Bot。\n');
+  }
   // 新话题工作目录：两种模式二选一。旧问法只问「默认工作目录」但写的是
   // workingDir——那只是仓库选择卡片的扫描根，新话题照样弹卡，误导性强；
   // 真正「直接进目录、不弹卡」的是 defaultWorkingDir，现在显式让用户选。
@@ -1430,6 +1436,18 @@ async function cmdSetupScripted(argv: string[]): Promise<void> {
         failSetupScripted(cmd.json, `目录不存在或不是目录: ${preflightBadDirs.join(', ')}。请先创建，未创建应用。`);
         return;
       }
+      const preflightCli = checkCliAvailability({
+        cliId: preflight.cliId ?? 'claude-code',
+        cliPathOverride: preflight.cliPathOverride,
+        wrapperCli: preflight.wrapperCli,
+      });
+      if (!preflightCli.available) {
+        failSetupScripted(
+          cmd.json,
+          `所选 Agent 当前无法启动：${preflightCli.reason ?? '本地启动依赖不可用'}。请先安装或修正 PATH / CLI 路径，未创建应用。`,
+        );
+        return;
+      }
 
       const appName = resolveSetupAppName(cmd.flags.appName, existing.length);
       const requestedBrand = normalizeBrand(cmd.flags.brand);
@@ -1541,6 +1559,18 @@ async function cmdSetupScripted(argv: string[]): Promise<void> {
     const badDirs = invalidBotDirs(bot);
     if (badDirs.length > 0) {
       failSetupScripted(cmd.json, `目录不存在或不是目录: ${badDirs.join(', ')}。请先创建，未写入配置。`);
+      return;
+    }
+    const cliAvailability = checkCliAvailability({
+      cliId: bot.cliId ?? 'claude-code',
+      cliPathOverride: bot.cliPathOverride,
+      wrapperCli: bot.wrapperCli,
+    });
+    if (!cliAvailability.available) {
+      failSetupScripted(
+        cmd.json,
+        `所选 Agent 当前无法启动：${cliAvailability.reason ?? '本地启动依赖不可用'}。请先安装或修正 PATH / CLI 路径，未写入配置。`,
+      );
       return;
     }
 
@@ -1659,6 +1689,35 @@ async function cmdSetupScripted(argv: string[]): Promise<void> {
     if (badDirs.length > 0) {
       failSetupScripted(cmd.json, `目录不存在或不是目录: ${badDirs.join(', ')}。配置未修改。`);
       return;
+    }
+    const agentLaunchChanged = hasAgentLaunchConfigChanged(
+      {
+        cliId: original.cliId ?? 'claude-code',
+        cliPathOverride: original.cliPathOverride,
+        wrapperCli: original.wrapperCli,
+      },
+      {
+        cliId: edited.cliId ?? 'claude-code',
+        cliPathOverride: edited.cliPathOverride,
+        wrapperCli: edited.wrapperCli,
+      },
+    );
+    // Missing Agent dependencies must block introducing a broken launch
+    // configuration, but should not prevent an operator from rotating a secret
+    // or repairing an unrelated directory on an already-misconfigured bot.
+    if (agentLaunchChanged) {
+      const cliAvailability = checkCliAvailability({
+        cliId: edited.cliId ?? 'claude-code',
+        cliPathOverride: edited.cliPathOverride,
+        wrapperCli: edited.wrapperCli,
+      });
+      if (!cliAvailability.available) {
+        failSetupScripted(
+          cmd.json,
+          `所选 Agent 当前无法启动：${cliAvailability.reason ?? '本地启动依赖不可用'}。请先安装或修正 PATH / CLI 路径，配置未修改。`,
+        );
+        return;
+      }
     }
 
     const appIdChanged = edited.larkAppId !== original.larkAppId;
@@ -1819,6 +1878,15 @@ async function cmdSetup(): Promise<void> {
         rl.close();
         console.log('   配置未修改。');
         return;
+      }
+      const cliAvailability = checkCliAvailability({
+        cliId: edited.cliId ?? 'claude-code',
+        cliPathOverride: edited.cliPathOverride,
+        wrapperCli: edited.wrapperCli,
+      });
+      if (!cliAvailability.available) {
+        console.log(`\n⚠️  所选 Agent 当前无法启动：${cliAvailability.reason ?? '本地启动依赖不可用'}`);
+        console.log('   配置仍会保存；请在 daemon 所在机器安装或修正 PATH / CLI 路径后再启动新会话。\n');
       }
 
       // 凭证字段有变化时, 像 promptBotConfig 一样跑一次 tenant_access_token

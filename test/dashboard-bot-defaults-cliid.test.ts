@@ -3,6 +3,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { describe, expect, it } from 'vitest';
 import { displayCliId } from '../src/dashboard/web/bot-defaults.js';
 import { BotAgentSection } from '../src/dashboard/web/bot-defaults-page.js';
+import { isOnboardingSubmitDisabled } from '../src/dashboard/web/bot-onboarding.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -35,6 +36,37 @@ describe('bot defaults cli label', () => {
     expect(root.findByProps({ 'data-input': 'agentCliId' }).props.value).toBe('traex');
     expect(root.findByProps({ 'data-input': 'agentModel' }).props.value).toBe('glm-5.1');
     expect(root.findAllByProps({ 'data-action': 'save-agent' })).toHaveLength(1);
+  });
+
+  it('marks a locally missing Agent in the dropdown and shows an inline warning', () => {
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(BotAgentSection, {
+        bot: { larkAppId: 'cli_missing', cliId: 'codex', model: '' },
+        sessionFallback: 'codex',
+        cliState: {
+          options: [
+            { id: 'codex', label: 'Codex', available: false, command: 'codex' },
+          ],
+          ttadkModelDefault: 'glm-5.1',
+          ttadkModelSuggestions: [],
+        },
+        patchBot: () => undefined,
+      }));
+    });
+    const root = renderer.root;
+    const dropdown = root.findByProps({ dataInput: 'agentCliId' });
+    expect(dropdown.props.options[0].label).toContain('未安装');
+    expect(root.findByProps({ className: 'hint-warn' }).children.join('')).toContain('codex');
+  });
+});
+
+describe('bot onboarding Agent availability warning', () => {
+  it('does not hard-disable submit from the PATH-only option-list probe', () => {
+    expect(isOnboardingSubmitDisabled(false, 'reuse')).toBe(false);
+    expect(isOnboardingSubmitDisabled(false, 'qr')).toBe(false);
+    expect(isOnboardingSubmitDisabled(true, 'reuse')).toBe(true);
+    expect(isOnboardingSubmitDisabled(false, 'checking')).toBe(true);
   });
 });
 

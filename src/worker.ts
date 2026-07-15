@@ -15,7 +15,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
-import { isAbsolute, join, basename } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import {
@@ -103,6 +103,7 @@ import {
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch, parseWrapperCli, isTtadkWrapper } from './setup/cli-selection.js';
+import { cliUnavailableMessage } from './setup/cli-availability.js';
 import { findLaunchedCliPid, scheduleWrapperRealCliPid, readComm, isBareShellComm, bareShellLaunchKind } from './core/session-discovery.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { sessionReadyHookCommand } from './adapters/hook-command.js';
@@ -193,8 +194,10 @@ function refreshCliPluginGeneration(
   for (const diagnostic of generation.diagnostics) log(`Plugin generation: ${diagnostic}`);
   if (generation.fatal) {
     const reason = generation.diagnostics.join(', ') || 'unknown';
-    send({ type: 'user_notify', message: t('worker.skill_delivery_failed', { reason }) });
-    throw new Error(`Skill delivery blocked CLI generation: ${reason}`);
+    // Init errors are now user-visible through one structured `error` IPC.
+    // Throw the actionable text itself so this fatal path does not emit both a
+    // user_notify and an error card for the same failure.
+    throw new Error(t('worker.skill_delivery_failed', { reason }));
   }
   cfg.prompt = generation.prompt;
   cfg.skillPluginDir = generation.skillPluginDir;
@@ -4381,12 +4384,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     if (decision.action === 'gate') {
       const detail = reason || decision.reason;
       log(`${effectiveBackend} backend unavailable and silent PTY fallback is disabled (set BACKEND_TYPE=pty to opt in): ${detail}`);
-      // user_notify is delivered to the Lark thread by the daemon (type:'error'
-      // is log-only); send it BEFORE throwing so the card lands. The throw is
-      // caught by the init handler, which sends type:'error' and exits — the
-      // IPC channel flushes these small messages before exit.
-      send({ type: 'user_notify', message: backendGateUserMessage(effectiveBackend, detail), turnId: cfg.turnId });
-      throw new Error(`${effectiveBackend} backend unavailable; refusing silent PTY fallback (set BACKEND_TYPE=pty to opt in): ${detail}`);
+      // Throw the actionable text itself. The init catch sends one `error` IPC
+      // message and the daemon now delivers that message to Lark. Keeping one
+      // channel avoids the old user_notify + error duplicate while still
+      // preventing init from emitting a false ready state.
+      throw new Error(backendGateUserMessage(effectiveBackend, detail));
     }
   }
   effectiveBackendType = effectiveBackend;
@@ -4874,28 +4876,22 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   } else {
     log(`Spawning fresh CLI: ${cliAdapter.resolvedBin} ${args.join(' ')} (cwd: ${cfg.workingDir})`);
 
-    // Pre-flight: resolvedBin resolves here (lazy). If resolveCommand fell back
-    // to a bare name and it isn't on the worker's PATH either, the spawn would
-    // fail repeatedly and surface only as a generic crash-loop ("X crashed N
-    // times"), with no hint about WHY. Instead surface ONE clear, reproducible
-    // message and stop — the user can fix PATH / install the CLI and retry.
-    //
-    // Remote backends (riff) have no local binary — they use an HTTP API. Skip
-    // the binary check for them: resolvedBin is '' by design, and the backend
-    // handles everything internally.
-    const wantBin = cliAdapter.resolvedBin;
-    if (effectiveBackendType !== 'riff' && !locateOnPath(wantBin)) {
-      log(`CLI binary not found: ${wantBin} (PATH=${process.env.PATH ?? ''})`);
-      const probe = isAbsolute(wantBin) ? `ls -l ${wantBin}` : `which ${wantBin}`;
-      send({
-        type: 'user_notify',
-        turnId: currentBotmuxTurnId,
-        message:
-          `无法启动 ${cliName()}：找不到可执行文件「${wantBin}」。\n` +
-          `请在运行 botmux daemon 的这台机器上确认它已安装并在 PATH 中（自查：${probe}），然后重发消息重试。\n` +
-          `当前 daemon PATH=${process.env.PATH ?? '(空)'}`,
-      });
-      return;
+    // Pre-flight the ACTUAL launch dependency, not merely adapter.resolvedBin:
+    // wrapperCli replaces that binary, while Codex App / Mir use a bundled Node
+    // runner that starts codex / mircli one level later.  Returning here used to
+    // make init continue and emit a false `ready`; throwing routes the failure
+    // through the daemon's user-visible init-error path and prevents an orphaned
+    // "starting" card with no CLI behind it.
+    const unavailable = effectiveBackendType === 'riff'
+      ? undefined
+      : cliUnavailableMessage({
+          cliId: cfg.cliId as CliId,
+          cliPathOverride: cfg.cliPathOverride,
+          wrapperCli: cfg.wrapperCli,
+        }, cliName());
+    if (unavailable) {
+      log(`${unavailable} (PATH=${process.env.PATH ?? ''})`);
+      throw new Error(unavailable);
     }
   }
 
@@ -6608,14 +6604,54 @@ if(!${isTmuxMode && !isPipeMode}){
 
 // ─── IPC Communication ───────────────────────────────────────────────────────
 
-function send(msg: WorkerToDaemon): void {
-  const payload: WorkerToDaemon = msg.type === 'final_output' && sessionId
+function workerIpcPayload(msg: WorkerToDaemon): WorkerToDaemon {
+  return msg.type === 'final_output' && sessionId
     ? { ...msg, sessionId }
     : msg;
+}
+
+function send(msg: WorkerToDaemon): void {
+  const payload = workerIpcPayload(msg);
   if (isWorkflowWorker() && payload.type === 'final_output') {
     workflowFinalOutputSent = true;
   }
   process.send?.(payload);
+}
+
+/** Deliver a terminal IPC message before exiting the worker. `process.send()`
+ * only queues asynchronously; calling process.exit() on the next line can drop
+ * the exact startup diagnostic the user needs and recreate the silent-bot bug.
+ */
+function sendAndFlush(msg: WorkerToDaemon): Promise<void> {
+  const payload = workerIpcPayload(msg);
+  return new Promise((resolve) => {
+    if (!process.send || !process.connected) {
+      resolve();
+      return;
+    }
+    try {
+      process.send(payload, () => resolve());
+    } catch {
+      resolve();
+    }
+  });
+}
+
+let fatalWorkerErrorPending = false;
+
+/** Surface a fatal (re)launch failure before terminating the worker. This is
+ * used both during init and after a previously-ready worker tries to recover
+ * from a stopped/crashed CLI, so those later paths cannot regress to a silent
+ * unhandled rejection/exception. */
+async function sendFatalWorkerErrorAndExit(err: unknown, turnId = currentBotmuxTurnId): Promise<void> {
+  if (fatalWorkerErrorPending) return;
+  fatalWorkerErrorPending = true;
+  await sendAndFlush({
+    type: 'error',
+    message: err instanceof Error ? err.message : String(err),
+    turnId,
+  });
+  process.exit(1);
 }
 
 function log(msg: string): void {
@@ -6724,8 +6760,8 @@ process.on('message', async (raw: unknown) => {
 
         send({ type: 'ready', port, token: writeToken, turnId: currentBotmuxTurnId });
       } catch (err: any) {
-        send({ type: 'error', message: `init failed: ${err.message}` });
-        process.exit(1);
+        await sendFatalWorkerErrorAndExit(err);
+        return;
       }
       break;
     }
@@ -6752,7 +6788,12 @@ process.on('message', async (raw: unknown) => {
         awaitingFirstPrompt = true;
         startScreenUpdates();
         startScreenAnalyzer();
-        spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
+        try {
+          spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
+        } catch (err) {
+          await sendFatalWorkerErrorAndExit(err, msg.turnId);
+          return;
+        }
       }
       if (lastInitConfig?.adoptMode) {
         // Bridge mode: capture transcript baseline BEFORE writing to the pane,
@@ -6918,11 +6959,15 @@ process.on('message', async (raw: unknown) => {
         }
         killCli();
         awaitingFirstPrompt = true;
-        setTimeout(() => {
+        setTimeout(async () => {
           if (lastInitConfig) {
             startScreenUpdates();
             startScreenAnalyzer();
-            spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
+            try {
+              spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
+            } catch (err) {
+              await sendFatalWorkerErrorAndExit(err);
+            }
           }
         }, 500);
       };

@@ -5,6 +5,9 @@ export type CliOption = {
   label: string;
   gateway?: 'ttadk';
   acceptsModel?: boolean;
+  available?: boolean;
+  command?: string;
+  availabilityReason?: string;
 };
 
 export type CliOptionsState = {

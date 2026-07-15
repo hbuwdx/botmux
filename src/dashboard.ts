@@ -41,6 +41,7 @@ import {
   TTADK_DEFAULT_MODEL,
   TTADK_MODEL_SUGGESTIONS,
 } from './setup/cli-selection.js';
+import { checkCliAvailability } from './setup/cli-availability.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeDashboardConfig, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
 import { hostLocalTimeZone, scheduleTimeZone } from './utils/timezone.js';
@@ -2540,14 +2541,26 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/cli-options') {
       const webSession = await botOnboarding.sessionStatus();
       return jsonRes(res, 200, {
-        options: CLI_SELECT_OPTIONS.map((o) => ({
-          id: o.key,
-          label: o.label,
-          // ttadk 网关项: 前端据此把模型框默认成 glm-5.1 并挂候选下拉; CoCo 不接受 -m.
-          ...(isTtadkWrapper(o.wrapperCli)
-            ? { gateway: 'ttadk' as const, acceptsModel: ttadkAcceptsModel(o.wrapperCli) }
-            : {}),
-        })),
+        options: CLI_SELECT_OPTIONS.map((o) => {
+          // Keep the all-options scan shell-free so opening the form remains
+          // instant even when most of the 20+ CLIs are absent. The selected
+          // option is checked again with shell/rc resolution on submit/save.
+          const availability = checkCliAvailability({
+            cliId: o.cliId,
+            wrapperCli: o.wrapperCli,
+          }, { shellFallback: false });
+          return {
+            id: o.key,
+            label: o.label,
+            available: availability.available,
+            command: availability.command,
+            availabilityReason: availability.reason,
+            // ttadk 网关项: 前端据此把模型框默认成 glm-5.1 并挂候选下拉; CoCo 不接受 -m.
+            ...(isTtadkWrapper(o.wrapperCli)
+              ? { gateway: 'ttadk' as const, acceptsModel: ttadkAcceptsModel(o.wrapperCli) }
+              : {}),
+          };
+        }),
         // ttadk 模型默认值 + 候选 (单一事实源在 cli-selection), 供前端模型框使用.
         ttadkModelDefault: TTADK_DEFAULT_MODEL,
         ttadkModelSuggestions: TTADK_MODEL_SUGGESTIONS,
@@ -2577,7 +2590,7 @@ const server = createServer(async (req, res) => {
       }
       // CLI: 把下拉传来的选择键 (普通 cliId 或 aiden-x-claude/codex) 解析成
       // { cliId, wrapperCli }——空 → 默认 claude-code; 非法键 → 400.
-      let cliId: CliId | undefined;
+      let cliId: CliId;
       let wrapperCli: string | undefined;
       try {
         const key = typeof parsed.cliId === 'string' && parsed.cliId.trim() ? parsed.cliId.trim() : 'claude-code';
@@ -2586,6 +2599,15 @@ const server = createServer(async (req, res) => {
         wrapperCli = sel.wrapperCli;
       } catch (err: any) {
         return jsonRes(res, 400, { ok: false, error: 'invalid_cli', message: err?.message ?? String(err) });
+      }
+      const availability = checkCliAvailability({ cliId, wrapperCli });
+      if (!availability.available) {
+        return jsonRes(res, 400, {
+          ok: false,
+          error: 'cli_not_found',
+          command: availability.command,
+          message: `所选 Agent 当前无法启动：${availability.reason ?? '本地启动依赖不可用'}。请先在 dashboard 所在机器安装后重试。`,
+        });
       }
       // 工作目录: 留空 → '~'; 在 daemon 主机上校验目录确实存在 (对齐 setup 的
       // ensureBotWorkingDirsExist). 失败 fail-fast, 让用户在扫码前就改对.
