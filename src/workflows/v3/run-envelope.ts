@@ -316,29 +316,48 @@ export type ReadRunEnvelopeResult =
  * Compatibility callers may fall back to grill state only for `missing`; an
  * existing invalid envelope must fail closed.
  *
- * Only a true ENOENT is `missing`. An existing path that is a symlink, FIFO,
- * directory, device, or otherwise non-regular file is always `invalid` — even
- * when a dangling symlink would make existsSync/stat follow-and-miss. The type
- * check runs on lstat BEFORE any open: a plain open(2) on a writerless FIFO
- * blocks forever, and this reader sits on daemon-side integrity paths. The
- * open then uses O_NOFOLLOW + O_NONBLOCK and re-confirms via fstat dev+ino so
- * a lstat→open TOCTOU swap can neither block nor substitute another file.
+ * Only an ENOENT from the initial lstat is `missing`. An existing path that
+ * is a symlink, FIFO, directory, device, or otherwise non-regular file is
+ * always `invalid` — even when a dangling symlink would make existsSync/stat
+ * follow-and-miss. The type check runs on lstat BEFORE any open: a plain
+ * open(2) on a writerless FIFO blocks forever, and this reader sits on
+ * daemon-side integrity paths. The open then uses O_NOFOLLOW + O_NONBLOCK and
+ * re-confirms via fstat dev+ino so a lstat→open TOCTOU swap can neither block
+ * nor substitute another file. Once lstat has observed the path, every later
+ * error — including ENOENT from a removal race — is `invalid`: the path
+ * changed mid-read, and missing-only legacy fallbacks must not engage.
  */
 export function readRunEnvelope(runDir: string, expectedRunId: string = basename(runDir)): ReadRunEnvelopeResult {
   const path = join(runDir, V3_RUN_ENVELOPE_FILE);
+  // Boundary 1: the initial lstat is the only place a true "file was never
+  // there" can be told apart from "path mutated while we were reading".
+  // It also must run before any open — open(O_RDONLY) on a FIFO with no
+  // writer blocks indefinitely regardless of O_NOFOLLOW.
+  let linkStat;
+  try {
+    linkStat = lstatSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { kind: 'missing', path };
+    return {
+      kind: 'invalid',
+      path,
+      problems: [`cannot read run.json: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  }
+  if (!linkStat.isFile()) {
+    return {
+      kind: 'invalid',
+      path,
+      problems: ['run.json must be a regular file'],
+    };
+  }
+  // Boundary 2: lstat saw a regular file, so from here every failure —
+  // ENOENT included — means the path changed underneath us and must fail
+  // closed as invalid, never as missing.
   let fd: number | undefined;
   let bytes: Buffer;
   try {
-    // lstat first — never open an unverified path: open(O_RDONLY) on a FIFO
-    // with no writer blocks indefinitely regardless of O_NOFOLLOW.
-    const linkStat = lstatSync(path);
-    if (!linkStat.isFile()) {
-      return {
-        kind: 'invalid',
-        path,
-        problems: ['run.json must be a regular file'],
-      };
-    }
     // O_NONBLOCK makes an open on a race-swapped FIFO return immediately
     // instead of blocking (it is a no-op for regular files); O_NOFOLLOW
     // rejects a swap to a symlink.
@@ -359,14 +378,14 @@ export function readRunEnvelope(runDir: string, expectedRunId: string = basename
     bytes = readFileSync(fd);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT') return { kind: 'missing', path };
     // ELOOP (Linux O_NOFOLLOW on symlink), EPERM (some NOFOLLOW platforms),
-    // and EISDIR all mean "path exists but is not a usable regular file".
-    if (code === 'ELOOP' || code === 'EPERM' || code === 'EISDIR' || code === 'ENOTDIR') {
+    // EISDIR, and a raced ENOENT all mean "the observed path stopped being a
+    // stable regular file".
+    if (code === 'ELOOP' || code === 'EPERM' || code === 'EISDIR' || code === 'ENOTDIR' || code === 'ENOENT') {
       return {
         kind: 'invalid',
         path,
-        problems: [`run.json must be a regular file (${code})`],
+        problems: [`run.json must be a stable regular file (${code})`],
       };
     }
     return {

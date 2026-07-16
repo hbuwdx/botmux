@@ -1,8 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...original,
+    openSync: vi.fn(original.openSync),
+  };
+});
+
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -360,26 +369,58 @@ describe('v3 run envelope — create-once publication + read states', () => {
     }
   });
 
+  it('treats a post-lstat removal race as invalid, not missing', () => {
+    const { base, runDir, runId } = freshRun();
+    try {
+      const envelope = adHocEnvelope(runDir, runId);
+      publishRunEnvelopeOnce(runDir, envelope);
+      const envelopePath = join(runDir, V3_RUN_ENVELOPE_FILE);
+      const enoent = Object.assign(
+        new Error(`ENOENT: no such file or directory, open '${envelopePath}'`),
+        { code: 'ENOENT', errno: -2, syscall: 'open', path: envelopePath },
+      );
+      // lstat observes the real regular file; the injected open ENOENT models
+      // the path being removed in the lstat→open window. A missing-only
+      // legacy fallback must not engage on a path that was just seen.
+      vi.mocked(openSync).mockImplementationOnce(() => { throw enoent; });
+      const read = readRunEnvelope(runDir);
+      expect(read.kind).toBe('invalid');
+      if (read.kind === 'invalid') {
+        expect(read.problems.join(' ')).toMatch(/stable regular file \(ENOENT\)/);
+      }
+      // Only the raced call fails closed; the intact file still reads fine.
+      expect(readRunEnvelope(runDir)).toMatchObject({ kind: 'ok', envelope });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  // FIFO scenarios run in a subprocess with a hard timeout: if a regression
+  // re-introduces a blocking open, the child is killed and execFileSync throws
+  // ETIMEDOUT instead of the vitest worker hanging forever.
+  function runEnvelopeDriver(mode: 'envelope' | 'load', runDir: string): Record<string, unknown> {
+    const stdout = execFileSync(
+      process.execPath,
+      ['--import', 'tsx', join(__dirname, 'fixtures', 'read-run-envelope-cli.ts'), mode, runDir],
+      { timeout: 15_000, encoding: 'utf8' },
+    );
+    return JSON.parse(stdout.trim().split('\n').pop()!) as Record<string, unknown>;
+  }
+
   it.runIf(process.platform !== 'win32')(
     'returns invalid immediately for a writerless FIFO run.json instead of blocking',
     () => {
       const { base, runDir } = freshRun();
       try {
-        const envelopePath = join(runDir, V3_RUN_ENVELOPE_FILE);
-        execFileSync('mkfifo', [envelopePath]);
-        // Before the lstat-first fix, open(O_RDONLY) on a writerless FIFO
-        // blocked forever and this test would hit the suite timeout.
-        const startedAt = Date.now();
-        const read = readRunEnvelope(runDir);
-        expect(Date.now() - startedAt).toBeLessThan(1000);
-        expect(read.kind).toBe('invalid');
-        if (read.kind === 'invalid') {
-          expect(read.problems.join(' ')).toMatch(/regular file/i);
-        }
+        execFileSync('mkfifo', [join(runDir, V3_RUN_ENVELOPE_FILE)]);
+        const result = runEnvelopeDriver('envelope', runDir);
+        expect(result.kind).toBe('invalid');
+        expect((result.problems as string[]).join(' ')).toMatch(/regular file/i);
       } finally {
         rmSync(base, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it.runIf(process.platform !== 'win32')(
@@ -391,15 +432,13 @@ describe('v3 run envelope — create-once publication + read states', () => {
         publishRunEnvelopeOnce(runDir, envelope);
         rmSync(join(runDir, 'dag.json'), { force: true });
         execFileSync('mkfifo', [join(runDir, 'dag.json')]);
-        const startedAt = Date.now();
-        expect(() => loadAuthorizedV3Run(runDir)).toThrowError(expect.objectContaining({
-          code: 'artifact_not_regular_file',
-        }));
-        expect(Date.now() - startedAt).toBeLessThan(1000);
+        const result = runEnvelopeDriver('load', runDir);
+        expect(result).toMatchObject({ threw: true, code: 'artifact_not_regular_file' });
       } finally {
         rmSync(base, { recursive: true, force: true });
       }
     },
+    30_000,
   );
 
   it('publishes once, accepts an exact semantic retry, and leaves no temp file', () => {
