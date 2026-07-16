@@ -45,6 +45,18 @@ vi.mock('../src/config.js', () => ({
   },
 }));
 
+// command-handler's cross-daemon calls are authenticated in production. These
+// unit tests exercise relay orchestration with a stubbed global fetch, so keep
+// that seam while bypassing host-secret filesystem setup.
+vi.mock('../src/core/daemon-ipc-auth.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/daemon-ipc-auth.js')>();
+  return {
+    ...actual,
+    fetchDaemonIpc: (port: number, path: string, init?: RequestInit) =>
+      fetch(`http://127.0.0.1:${port}${path}`, init),
+  };
+});
+
 vi.mock('../src/global-config.js', () => ({
   readGlobalConfig: vi.fn(() => ({})),
   isRemoteAccessEnabled: vi.fn(() => false),
@@ -209,7 +221,12 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
 }));
 
 vi.mock('../src/im/lark/client.js', () => ({
-  UserTokenMissingError: class UserTokenMissingError extends Error {},
+  UserTokenMissingError: class UserTokenMissingError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'UserTokenMissingError';
+    }
+  },
   deleteMessage: vi.fn(),
   sendMessage: vi.fn(async () => 'card-msg-id'),
   listChatBotMembers: vi.fn(async () => []),
@@ -331,12 +348,25 @@ vi.mock('../src/utils/user-token.js', () => ({
   DOC_COMMENT_OAUTH_SCOPES: ['docs:document.comment:read'],
 }));
 
-vi.mock('../src/im/lark/doc-comment.js', () => ({
-  resolveDocFile: vi.fn(async () => ({ fileToken: 'doc_token_12345678901234567890', fileType: 'docx' })),
-  listDocComments: vi.fn(async () => []),
-  subscribeDocFile: vi.fn(async () => {}),
-  unsubscribeDocFile: vi.fn(async () => {}),
-}));
+vi.mock('../src/im/lark/doc-comment.js', () => {
+  class DocSubscriptionPermissionError extends Error {
+    readonly larkCode = 1069603;
+    constructor(readonly details: { source: 'user' | 'tenant' | 'both' | 'unknown' }) {
+      super(`订阅文档被飞书拒绝（source: ${details.source}）。`);
+      this.name = 'DocSubscriptionPermissionError';
+    }
+    get source() {
+      return this.details.source;
+    }
+  }
+  return {
+    DocSubscriptionPermissionError,
+    resolveDocFile: vi.fn(async () => ({ fileToken: 'doc_token_12345678901234567890', fileType: 'docx' })),
+    listDocComments: vi.fn(async () => []),
+    subscribeDocFile: vi.fn(async () => {}),
+    unsubscribeDocFile: vi.fn(async () => {}),
+  };
+});
 
 vi.mock('../src/services/doc-subs-store.js', () => ({
   putDocSubscription: vi.fn(() => ({})),
@@ -420,12 +450,12 @@ import { getSessionWorkingDir, buildNewTopicPrompt, buildNewTopicCliInput, ensur
 import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
-import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
+import { deleteMessage, sendMessage, listChatBotMembers, UserTokenMissingError } from '../src/im/lark/client.js';
 import { buildSlashListCard, buildSessionClosedCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot, findOncallChat, effectiveDefaultWorkingDir } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../src/utils/user-token.js';
-import { resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../src/im/lark/doc-comment.js';
+import { DocSubscriptionPermissionError, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../src/im/lark/doc-comment.js';
 import { putDocSubscription, removeDocSubscription, listAllDocSubscriptions, getDocSubscription } from '../src/services/doc-subs-store.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync, readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -545,7 +575,7 @@ function mockCodexAppBot(): void {
 
 describe('DAEMON_COMMANDS set', () => {
   it('should contain all expected commands', () => {
-    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/schedule', '/role', '/botconfig', '/skills', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/term', '/list-slash-command', '/slash', '/land', '/subscribe-lark-doc', '/watch-comment', '/insight', '/dashboard', '/vc-auth'];
+    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/rename', '/schedule', '/role', '/botconfig', '/skills', '/pair', '/login', '/adopt', '/detach', '/disconnect', '/oncall', '/group', '/g', '/relay', '/card', '/term', '/list-slash-command', '/slash', '/land', '/subscribe-lark-doc', '/watch-comment', '/insight', '/dashboard', '/vc-auth'];
     for (const cmd of expected) {
       expect(DAEMON_COMMANDS.has(cmd), `Expected DAEMON_COMMANDS to contain ${cmd}`).toBe(true);
     }
@@ -572,9 +602,9 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
-    // 29 = the prior 28 commands + /watch-comment. /subscribe-lark-doc remains
-    // as its original per-file API subscription command rather than an alias.
-    expect(DAEMON_COMMANDS.size).toBe(29);
+    // 30 = the prior 28 commands + /watch-comment + /rename. /subscribe-lark-doc
+    // remains as its original per-file API subscription command rather than an alias.
+    expect(DAEMON_COMMANDS.size).toBe(30);
   });
 
   it('contains the /list-slash-command lister and its /slash alias', () => {
@@ -805,6 +835,12 @@ describe('PASSTHROUGH_COMMANDS set', () => {
     expect(resolvePassthroughCommands('app-1').has('/goal')).toBe(true);
     expect(resolvePassthroughCommands('app-2').has('/goal')).toBe(true);
   });
+
+  it('does not expose Codex interactive /title through the Lark channel', () => {
+    expect(PASSTHROUGH_COMMANDS.has('/title')).toBe(false);
+    expect(DAEMON_COMMANDS.has('/title')).toBe(false);
+    expect(resolvePassthroughCommands('app-2').has('/title')).toBe(false);
+  });
 });
 
 describe('parseSlashCommandInvocation', () => {
@@ -963,6 +999,60 @@ describe('handleCommand', () => {
         expect.any(String),
         LARK_APP_ID,
         expect.objectContaining({ managedBy: 'subscribe-lark-doc' }),
+      );
+    });
+
+    it.each([
+      ['user', '当前用户身份'],
+      ['tenant', '机器人应用身份'],
+      ['both', '当前用户身份和机器人应用身份'],
+      ['unknown', '调用身份'],
+    ] as const)(
+      '/subscribe-lark-doc reports the actual 1069603 identity source: %s',
+      async (source, expectedIdentity) => {
+        vi.mocked(resolveUserToken).mockResolvedValue('uat-doc');
+        vi.mocked(subscribeDocFile).mockRejectedValueOnce(
+          new DocSubscriptionPermissionError({ source }),
+        );
+        const deps = makeDeps(makeDaemonSession());
+
+        await handleCommand(
+          '/subscribe-lark-doc',
+          ROOT_ID,
+          makeLarkMessage('/subscribe-lark-doc https://example.feishu.cn/docx/AbCdEf12345678901234'),
+          deps,
+          LARK_APP_ID,
+        );
+
+        const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+        expect(replyContent).toContain(expectedIdentity);
+        expect(replyContent).toContain('文档访问记录功能');
+        expect(replyContent).toContain('1069603');
+        expect(generateAuthUrl).not.toHaveBeenCalled();
+      },
+    );
+
+    it('/subscribe-lark-doc still prompts document OAuth for a runtime-expired user token', async () => {
+      vi.mocked(resolveUserToken).mockResolvedValue('uat-doc');
+      vi.mocked(subscribeDocFile).mockRejectedValueOnce(new UserTokenMissingError('User Token 已失效'));
+      const deps = makeDeps(makeDaemonSession());
+
+      await handleCommand(
+        '/subscribe-lark-doc',
+        ROOT_ID,
+        makeLarkMessage('/subscribe-lark-doc https://example.feishu.cn/docx/AbCdEf12345678901234'),
+        deps,
+        LARK_APP_ID,
+      );
+
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('文档权限');
+      expect(replyContent).toContain('https://open.feishu.cn/auth/v1/test');
+      expect(generateAuthUrl).toHaveBeenCalledWith(
+        LARK_APP_ID,
+        'secret-1',
+        'feishu',
+        DOC_COMMENT_OAUTH_SCOPES,
       );
     });
 
@@ -1309,6 +1399,7 @@ describe('handleCommand', () => {
       expect(replyContent).toContain('/restart');
       expect(replyContent).toContain('/cd');
       expect(replyContent).toContain('/repo');
+      expect(replyContent).toContain('/rename');
       expect(replyContent).toContain('/status');
       expect(replyContent).toContain('/help');
       expect(replyContent).toContain('/schedule');
@@ -1474,6 +1565,64 @@ describe('handleCommand', () => {
 
       expect(killWorker).toHaveBeenCalledWith(ds);
       expect(ds.workingDir).toBe('/data00/home/wanghao.muchen/ai-workspace/marketing_insight');
+    });
+  });
+
+  // ─── /rename ─────────────────────────────────────────────────────────────
+
+  describe('/rename', () => {
+    it('shows usage when no title is provided', async () => {
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+
+      await handleCommand('/rename', ROOT_ID, makeLarkMessage('/rename'), deps, LARK_APP_ID);
+
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('/rename');
+      expect(replyContent).toContain('新的会话标题');
+      expect(sessionStore.updateSession).not.toHaveBeenCalled();
+    });
+
+    it('reports when there is no active session', async () => {
+      const deps = makeDeps();
+
+      await handleCommand('/rename', ROOT_ID, makeLarkMessage('/rename Better label'), deps, LARK_APP_ID);
+
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('没有活跃的会话');
+      expect(sessionStore.updateSession).not.toHaveBeenCalled();
+    });
+
+    it('updates the session title without restarting the worker', async () => {
+      const ds = makeDaemonSession();
+      const deps = makeDeps(ds);
+
+      await handleCommand('/rename', ROOT_ID, makeLarkMessage('/rename  ZMX 后端集成推进  '), deps, LARK_APP_ID);
+
+      expect(ds.session.title).toBe('ZMX 后端集成推进');
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(sessionStore.updateSession).toHaveBeenCalledWith(ds.session);
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('会话标题已更新');
+      expect(replyContent).toContain('ZMX 后端集成推进');
+      expect(replyContent).toContain('Agent 当前未运行');
+    });
+
+    it('requests native rename from a live Codex worker without restarting it', async () => {
+      const send = vi.fn();
+      const ds = makeDaemonSession({
+        session: makeSession({ cliId: 'codex', cliPathOverride: '/bin/codex' }),
+        worker: { killed: false, connected: true, send } as any,
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/rename', ROOT_ID, makeLarkMessage('/rename  Native 同步  '), deps, LARK_APP_ID);
+
+      expect(send).toHaveBeenCalledWith({ type: 'rename_session', title: 'Native 同步' });
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(ds.session.title).toBe('Native 同步');
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('已向 codex 发送原生改名请求');
     });
   });
 

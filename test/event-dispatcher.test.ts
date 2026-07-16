@@ -105,6 +105,7 @@ vi.mock('../src/services/substitute-chat-toggle-store.js', () => ({
 
 // Capture the registered event handlers from EventDispatcher.register()
 let capturedHandlers: Record<string, Function> = {};
+let capturedWsClientOptions: Record<string, any> | undefined;
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
   class MockEventDispatcher {
@@ -114,6 +115,9 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
     }
   }
   class MockWSClient {
+    constructor(options: Record<string, any>) {
+      capturedWsClientOptions = options;
+    }
     start = vi.fn(async () => {});
     getConnectionStatus = vi.fn(() => ({ state: 'connected', reconnectAttempts: 0 }));
   }
@@ -148,6 +152,7 @@ const OTHER_BOT_APP_ID = 'app-bot-b';
 const USER_OPEN_ID = 'ou_user_123';
 
 beforeEach(() => {
+  capturedWsClientOptions = undefined;
   mockListChatMessages.mockReset().mockResolvedValue([]);
   mockListChatMessagesUntil.mockReset().mockResolvedValue([]);
   mockListThreadMessages.mockReset().mockResolvedValue([]);
@@ -301,6 +306,86 @@ function makeUserMessageEvent(opts: {
     },
   };
 }
+
+const WS_PROXY_ENV_KEYS = [
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'ALL_PROXY',
+  'all_proxy',
+  'NO_PROXY',
+  'no_proxy',
+  'NPM_CONFIG_HTTPS_PROXY',
+  'npm_config_https_proxy',
+  'NPM_CONFIG_PROXY',
+  'npm_config_proxy',
+  'NPM_CONFIG_NO_PROXY',
+  'npm_config_no_proxy',
+] as const;
+
+function withWsProxyEnv(values: Partial<Record<(typeof WS_PROXY_ENV_KEYS)[number], string>>, callback: () => void): void {
+  const original = Object.fromEntries(
+    WS_PROXY_ENV_KEYS.map(key => [key, process.env[key]]),
+  );
+  for (const key of WS_PROXY_ENV_KEYS) delete process.env[key];
+  Object.assign(process.env, values);
+
+  try {
+    callback();
+  } finally {
+    for (const key of WS_PROXY_ENV_KEYS) {
+      const value = original[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+describe('startLarkEventDispatcher — WebSocket proxy', () => {
+  it('uses HTTPS proxy precedence for secure WebSocket URLs', () => {
+    withWsProxyEnv({
+      HTTPS_PROXY: 'http://upper-proxy:8118',
+      https_proxy: 'http://lower-proxy:8118',
+    }, () => {
+      startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+
+      const agent = capturedWsClientOptions?.agent;
+      expect(agent?.constructor?.name).toBe('ProxyAgent');
+      expect(agent?.getProxyForUrl('wss://msg-frontier.feishu.cn/ws', {})).toBe('http://lower-proxy:8118');
+    });
+  });
+
+  it('honors NO_PROXY for the WebSocket destination', () => {
+    withWsProxyEnv({
+      HTTPS_PROXY: 'http://proxy.example:8118',
+      NO_PROXY: '.feishu.cn',
+    }, () => {
+      startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+
+      const agent = capturedWsClientOptions?.agent;
+      expect(agent?.getProxyForUrl('wss://msg-frontier.feishu.cn/ws', {})).toBe('');
+      expect(agent?.getProxyForUrl('wss://msg-frontier.larksuite.com/ws', {})).toBe('http://proxy.example:8118');
+    });
+  });
+
+  it('supports an ALL_PROXY fallback such as SOCKS', () => {
+    withWsProxyEnv({ ALL_PROXY: 'socks5://127.0.0.1:1080' }, () => {
+      startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+
+      const agent = capturedWsClientOptions?.agent;
+      expect(agent?.getProxyForUrl('wss://msg-frontier.feishu.cn/ws', {})).toBe('socks5://127.0.0.1:1080');
+    });
+  });
+
+  it('keeps the SDK default agent when no proxy is configured', () => {
+    withWsProxyEnv({}, () => {
+      startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+
+      expect(capturedWsClientOptions?.agent).toBeUndefined();
+    });
+  });
+});
 
 describe('startLarkEventDispatcher — VC bot meeting push events', () => {
   beforeEach(() => {
@@ -1666,6 +1751,95 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       scope: 'thread',
       larkAppId: MY_APP_ID,
     }));
+  });
+
+  it('routes an explicit @mention through the anchor returned by beforeSessionTurn', async () => {
+    let hookAnchor: string | undefined;
+    const beforeSessionTurn = vi.fn(async (_data: any, ctx: { anchor: string }) => {
+      hookAnchor = ctx.anchor;
+      return { anchorOverride: 'vc-receiver-session-1' };
+    });
+    handlers.beforeSessionTurn = beforeSessionTurn;
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'vc-receiver-session-1');
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA follow up on the meeting' }),
+      rootId: 'visible-topic-root',
+      messageId: 'msg-anchor-override',
+      chatId: 'chat-anchor-override',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(beforeSessionTurn).toHaveBeenCalledTimes(1);
+    expect(beforeSessionTurn.mock.calls[0]?.[0]).toBe(event);
+    expect(beforeSessionTurn.mock.calls[0]?.[2]).toEqual(expect.objectContaining({
+      senderOpenId: USER_OPEN_ID,
+      explicitlyMentionedThisBot: true,
+    }));
+    expect(hookAnchor).toBe('chat-anchor-override');
+    expect(handlers.isSessionOwner).toHaveBeenCalledWith('vc-receiver-session-1', MY_APP_ID);
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      anchor: 'vc-receiver-session-1',
+      scope: 'chat',
+      chatId: 'chat-anchor-override',
+      replyRootId: 'visible-topic-root',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('does not route an explicit @mention when beforeSessionTurn blocks it', async () => {
+    const beforeSessionTurn = vi.fn(async () => ({ block: true }));
+    handlers.beforeSessionTurn = beforeSessionTurn;
+    handlers.isSessionOwner.mockReturnValue(true);
+    mockListChatBotMembers.mockResolvedValue([{ openId: MY_OPEN_ID, name: 'BotA' }]);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA choose a meeting first' }),
+      rootId: 'ambiguous-topic-root',
+      messageId: 'msg-before-session-block',
+      chatId: 'chat-before-session-block',
+      chatType: 'group',
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(beforeSessionTurn).toHaveBeenCalledTimes(1);
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('does not call beforeSessionTurn or alter routing for a non-@ message', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'never' });
+    mockGetChatMode.mockResolvedValue('group');
+    const beforeSessionTurn = vi.fn(async () => ({ anchorOverride: 'must-not-be-used' }));
+    handlers.beforeSessionTurn = beforeSessionTurn;
+    handlers.isSessionOwner.mockReturnValue(false);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'ordinary ambient turn' }),
+      messageId: 'msg-without-explicit-mention',
+      chatId: 'chat-without-explicit-mention',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(beforeSessionTurn).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      anchor: 'chat-without-explicit-mention',
+      scope: 'chat',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
   it('treats 普通群 root_id WITHOUT thread_id as chat-scope (Lark quote-bubble quirk)', async () => {

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -60,6 +61,15 @@ function renderKanban(state: Partial<SessionsKanbanState>): string {
 }
 
 describe('dashboard sessions filters', () => {
+  it('reads filter input values before entering React state updaters', () => {
+    const page = readFileSync(new URL('../src/dashboard/web/sessions-page.tsx', import.meta.url), 'utf8');
+
+    expect(page).toContain('const q = event.currentTarget.value;');
+    expect(page).toContain('const active = event.currentTarget.checked;');
+    expect(page).not.toContain('q: event.currentTarget.value');
+    expect(page).not.toContain('active: event.currentTarget.checked');
+  });
+
   it('derives CLI filter options from the shared CLI registry', () => {
     expect(CLI_FILTER_OPTIONS).toContain('codex');
     expect(CLI_FILTER_OPTIONS).toContain('codex-app');

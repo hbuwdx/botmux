@@ -9,7 +9,7 @@ import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, dirname, extname, resolve, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { randomBytes, createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
 import { listenWithProbe } from './utils/listen-with-probe.js';
@@ -20,7 +20,7 @@ import {
 import { DaemonRegistry } from './dashboard/registry.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { pickCreatorForGroup } from './dashboard/operator-selector.js';
-import { planGroupCreator } from './dashboard/team-group.js';
+import { buildTeamGroupCreatePayload, planGroupCreator } from './dashboard/team-group.js';
 import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
 import { handleV3RunsApi } from './dashboard/v3-runs-api.js';
 import { defaultRunsDir as v3RunsDir } from './workflows/v3/ops-projection.js';
@@ -30,6 +30,7 @@ import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/pub
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
+import type { TeamGroupCreateResult, TeamGroupOwnerTransferResult } from './dashboard/federated-group-core.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { FeishuLoginManager } from './dashboard/feishu-login.js';
@@ -100,13 +101,28 @@ import {
   updateInstalledSkillAsync,
 } from './services/skill-registry-store.js';
 import { redactGitUrlCredentials } from './core/skills/sources.js';
-import { getBot, loadBotConfigs, type BotConfig, type VcMeetingAgentConfig } from './bot-registry.js';
+import { effectiveDefaultWorkingDir, getBot, loadBotConfigs, parseBotConfigsFromText, type BotConfig, type VcMeetingAgentConfig } from './bot-registry.js';
 import { findEntryIndex, readRawConfig, requireConfigPath, writeRawConfigAtomic } from './services/config-store.js';
 import type { BotSkillPolicy, SkillPackage } from './core/skills/types.js';
 import { discoverNativeCliSkillGroups } from './core/skills/discovery.js';
 import { analyzeSkillReferences, type SkillReferenceBot, type SkillReferenceSummary } from './core/skills/references.js';
 import { discoverDashboardSkills, installDashboardSkill, parseDashboardSkillInstallRequest, parseInstallLocalLinksSources, MAX_LOCAL_LINK_SOURCES } from './dashboard/skill-install-request.js';
 import { botDefaultsPayload, botSummaryPayload } from './dashboard/bot-payload.js';
+import {
+  handleVcMeetingConsumerProfilesGet,
+  handleVcMeetingConsumerProfilesPut,
+  type VcMeetingConsumerProfilesApiDeps,
+} from './dashboard/vc-consumer-profiles-api.js';
+import {
+  buildVcMeetingConsumerBootstrapAgents,
+  seedVcMeetingDefaultConsumerProfile,
+} from './services/vc-meeting-consumer-profile-bootstrap.js';
+import { evaluateVcMeetingConsumerIsolation } from './services/vc-meeting-consumer-isolation.js';
+import { resolvePairedSpawnBackendType } from './core/persistent-backend.js';
+import {
+  readVcMeetingConsumerProfiles,
+  updateVcMeetingConsumerProfiles,
+} from './services/vc-meeting-consumer-profile-store.js';
 import { isValidRoleProfileId } from './services/role-profile-store.js';
 import { mergeSafeInsightOverviews } from './services/insight/report.js';
 import type { SafeInsightOverview } from './services/insight/types.js';
@@ -132,6 +148,7 @@ import { resolveEffectivePluginIds, updateBotPluginOverride } from './core/plugi
 import { assertPluginBindingTransition, describePluginDependencyError } from './core/plugins/dependencies.js';
 import { inspectGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
 import type { InstalledPluginRecord, PluginDashboardEntry } from './core/plugins/types.js';
+import { fetchDaemonIpc } from './core/daemon-ipc-auth.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
@@ -232,17 +249,6 @@ function verifyDashboardBinding(port: number): Promise<boolean> {
   });
 }
 
-/** Sign a loopback request to a daemon's write-link route. The daemon verifies
- *  with the same .dashboard-secret, so only a caller that can read the secret —
- *  the dashboard — can mint write tokens; a bare local process that only knows
- *  the ipcPort can't. Same scheme as the `botmux dashboard` → /__cli/rotate
- *  HMAC. */
-function signDaemonTokenHeaders(): Record<string, string> {
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const nonce = randomBytes(8).toString('hex');
-  const sig = createHmac('sha256', SECRET).update(`${ts}:${nonce}`).digest('base64url');
-  return { 'X-Botmux-Cli-Ts': ts, 'X-Botmux-Cli-Nonce': nonce, 'X-Botmux-Cli-Auth': sig };
-}
 mkdirSync(REGISTRY_DIR, { recursive: true });
 const registry = new DaemonRegistry(REGISTRY_DIR);
 const aggregator = new Aggregator();
@@ -412,13 +418,43 @@ function refreshLocalVcMeetingAgentConfig(appId: string): void {
   }
 }
 
+function vcMeetingConsumerProfilesApiDeps(): VcMeetingConsumerProfilesApiDeps {
+  return {
+    readSnapshot: readVcMeetingConsumerProfiles,
+    updateSnapshot: updateVcMeetingConsumerProfiles,
+    loadBotConfigs,
+    effectiveDefaultWorkingDir,
+    onlineBotName: appId => registry.getByAppId(appId)?.botName,
+    isOnline: appId => !!registry.getByAppId(appId),
+    adapterReliableTurnTerminal: (cliId, cliPathOverride) => {
+      if (!cliId) return false;
+      try {
+        return createCliAdapterSync(cliId as CliId, cliPathOverride).reliableTurnTerminal === true;
+      } catch {
+        return false;
+      }
+    },
+    managedSideEffectIsolation: bot => evaluateVcMeetingConsumerIsolation({
+      sandbox: bot.sandbox,
+      platform: process.platform,
+      backendType: resolvePairedSpawnBackendType(
+        bot.cliId ?? config.daemon.cliId,
+        undefined,
+        bot.backendType,
+        config.daemon.backendType,
+      ),
+    }).ok,
+    reloadDaemons: reloadVcMeetingBotConfigOnDaemons,
+  };
+}
+
 async function reloadVcMeetingBotConfigOnDaemons(appIds: string[]): Promise<void> {
   const unique = [...new Set(appIds.filter(Boolean))];
   for (const appId of unique) refreshLocalVcMeetingAgentConfig(appId);
   await Promise.all(unique.map(async appId => {
     const d = registry.getByAppId(appId);
     if (!d) return;
-    await fetch(`http://127.0.0.1:${d.ipcPort}/api/bot-config/reload`, {
+    await fetchDaemonIpc(d.ipcPort, '/api/bot-config/reload', {
       method: 'POST',
       signal: AbortSignal.timeout(10_000),
     }).catch(() => undefined);
@@ -655,7 +691,8 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
         const entry = raw[idx] as Record<string, unknown>;
         const next = normalizeVcMeetingAgentRecord(entry.vcMeetingAgent);
         let entryChanged = false;
-        if (next.enabled !== true) {
+        const firstEnable = next.enabled !== true;
+        if (firstEnable) {
           next.enabled = true;
           next.dashboardManagedListener = true;
           entryChanged = true;
@@ -665,17 +702,30 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
           entryChanged = true;
         }
         const mc = next.meetingConsumer;
-        if (!mc || typeof mc !== 'object' || Array.isArray(mc)) {
-          next.meetingConsumer = { enabled: true };
+        const mcRec = mc && typeof mc === 'object' && !Array.isArray(mc)
+          ? { ...(mc as Record<string, unknown>) }
+          : {};
+        // Selecting a global listener is the Dashboard's explicit opt-in to the
+        // complete meeting pipeline. It intentionally re-enables the listener's
+        // consumer surface; profile/default ownership is still preserved by the
+        // own-property gates in seedVcMeetingDefaultConsumerProfile below.
+        if (mcRec.enabled !== true) {
+          mcRec.enabled = true;
           entryChanged = true;
-        } else {
-          const mcRec = mc as Record<string, unknown>;
-          if (mcRec.enabled !== true) {
-            mcRec.enabled = true;
-            next.meetingConsumer = mcRec;
-            entryChanged = true;
-          }
         }
+        if (seedVcMeetingDefaultConsumerProfile(
+          mcRec,
+          nextAppId,
+          // Resolve against the latest locked bots.json snapshot, not a stale
+          // pre-lock load. This also makes fallback selection independent of
+          // the order in which bot entries happen to be stored.
+          buildVcMeetingConsumerBootstrapAgents(
+            parseBotConfigsFromText(JSON.stringify(raw)),
+          ),
+        )) {
+          entryChanged = true;
+        }
+        next.meetingConsumer = mcRec;
         if (entryChanged) {
           compactVcMeetingAgentEntry(entry, next);
           changed = true;
@@ -698,7 +748,13 @@ async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, p
         }
       }
 
-      if (changed) await writeRawConfigAtomic(path, raw);
+      if (changed) {
+        // Validate the complete post-mutation file before replacing bots.json.
+        // Keep this path symmetric with daemon bootstrap so a future generated
+        // default cannot make the Dashboard persist an invalid registry.
+        parseBotConfigsFromText(JSON.stringify(raw));
+        await writeRawConfigAtomic(path, raw);
+      }
     });
   } catch (err: any) {
     return { ok: false, error: `vcMeetingAgent_listenerBot_config_write_failed: ${err?.message ?? err}` };
@@ -751,7 +807,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
 // route call through this so error codes / merge semantics stay identical.
 async function reloadLocaleOnAllDaemons(): Promise<void> {
   await Promise.all(registry.list().map(d =>
-    fetch(`http://127.0.0.1:${d.ipcPort}/api/locale/reload`, { method: 'POST' }).catch(() => undefined),
+    fetchDaemonIpc(d.ipcPort, '/api/locale/reload', { method: 'POST' }).catch(() => undefined),
   ));
 }
 const settingsWriteApplierDeps = defaultSettingsWriteApplierDeps(resolveDashboardSettings, reloadLocaleOnAllDaemons);
@@ -774,6 +830,7 @@ const groupsActionDeps: GroupsActionDeps = {
   registryGetByAppId: (id) => registry.getByAppId(id),
   proxyToDaemon,
   closeSessionsMatching,
+  fetch: fetchDaemonUrl,
 };
 
 // ─── PR2 C8: Route B internal API (`/__daemon/*`) ───────────────────────────
@@ -857,7 +914,7 @@ async function cachedChangelog(current: string, now = Date.now()): Promise<Chang
 }
 
 /**
- * Run the ownership-aware npm/pnpm update for the manual-update flow WITHOUT blocking
+ * Run the ownership-aware npm/pnpm/Bun update for the manual-update flow WITHOUT blocking
  * the event loop (async spawn, not execSync — the dashboard must keep serving
  * during the ~10-30s install). Resolves on exit 0; rejects with the tail of
  * stdout/stderr on a non-zero exit, spawn error, or 3-minute timeout. Args are
@@ -867,9 +924,9 @@ function runGlobalInstallLatest(plan: GlobalInstallPlan): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const child = spawn(plan.command, plan.args, {
       cwd: globalInstallUpdateCwd(),
-      env: process.env,
+      env: { ...process.env, ...plan.env },
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: process.platform === 'win32', // resolve npm.cmd / pnpm.cmd
+      shell: process.platform === 'win32', // resolve npm.cmd / pnpm.cmd / bun.exe
     });
     let tail = '';
     const capture = (d: Buffer): void => { tail = (tail + d.toString()).slice(-2000); };
@@ -905,8 +962,8 @@ async function attachDaemon(d: import('./dashboard/registry.js').DaemonInfo): Pr
     // 1. Hydrate snapshot (blocking — completes before we wire SSE)
     try {
       const [sRes, schRes] = await Promise.all([
-        fetch(`http://127.0.0.1:${d.ipcPort}/api/sessions`),
-        fetch(`http://127.0.0.1:${d.ipcPort}/api/schedules`),
+        fetchDaemonIpc(d.ipcPort, '/api/sessions'),
+        fetchDaemonIpc(d.ipcPort, '/api/schedules'),
       ]);
       const s = await sRes.json() as { sessions: any[] };
       const sch = await schRes.json() as { schedules: any[] };
@@ -921,6 +978,7 @@ async function attachDaemon(d: import('./dashboard/registry.js').DaemonInfo): Pr
         d.larkAppId,
         subscribeDaemon(d, aggregator, e =>
           logger.warn(`[aggregator] ${d.larkAppId}: ${e.message}`),
+          (_url, init) => fetchDaemonIpc(d.ipcPort, '/api/events', init),
         ),
       );
     }
@@ -1391,7 +1449,17 @@ async function proxyToDaemon(
       headers: { 'content-type': 'application/json' },
     });
   }
-  return fetch(`http://127.0.0.1:${d.ipcPort}${daemonPath}`, init);
+  return fetchDaemonIpc(d.ipcPort, daemonPath, init);
+}
+
+/** Authenticated adapter for helpers that receive a discovered daemon URL. */
+function fetchDaemonUrl(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const url = new URL(input instanceof Request ? input.url : String(input));
+  const port = Number(url.port);
+  if (url.hostname !== '127.0.0.1' || !Number.isSafeInteger(port) || port <= 0) {
+    return Promise.reject(new Error('daemon helper attempted a non-loopback URL'));
+  }
+  return fetchDaemonIpc(port, `${url.pathname}${url.search}`, init);
 }
 
 /** Create a Feishu group from the team UI: pick a creator daemon among the
@@ -1443,8 +1511,8 @@ function liveBots(): { larkAppId: string; botName: string; cliId?: string }[] {
   });
 }
 
-async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string; ownerUnionIds?: string[]; roleProfileId?: string }): Promise<{
-  ok: boolean; chatId?: string; shareLink?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; invalidOwnerUnionIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
+async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string; ownerUnionIds?: string[]; transferOwnerUnionId?: string; roleProfileId?: string }): Promise<TeamGroupCreateResult & {
+  autoInviteUnavailable?: boolean;
 }> {
   const selectedIds = Array.from(new Set(args.larkAppIds.filter(Boolean)));
   if (selectedIds.length === 0) return { ok: false, error: 'no_bots_selected' };
@@ -1469,13 +1537,14 @@ async function createTeamGroup(args: { name: string; larkAppIds: string[]; userO
     const upstream = await proxyToDaemon(plan.creatorLarkAppId, '/api/groups/create', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
+      body: JSON.stringify(buildTeamGroupCreatePayload({
         name: args.name,
         larkAppIds: selectedIds,
         userOpenIds,
         ownerUnionIds: args.ownerUnionIds ?? [],
-        ...(args.roleProfileId ? { roleProfileId: args.roleProfileId } : {}),
-      }),
+        transferOwnerUnionId: args.transferOwnerUnionId,
+        roleProfileId: args.roleProfileId,
+      })),
     });
     const text = await upstream.text();
     let parsed: any = null;
@@ -1483,9 +1552,51 @@ async function createTeamGroup(args: { name: string; larkAppIds: string[]; userO
     if (!upstream.ok || !parsed?.ok || typeof parsed.chatId !== 'string') {
       return { ok: false, error: parsed?.error ?? `group_create_http_${upstream.status}` };
     }
-    return { ok: true, chatId: parsed.chatId, shareLink: typeof parsed.shareLink === 'string' ? parsed.shareLink : undefined, invalidBotIds: parsed.invalidBotIds ?? [], invalidUserIds: parsed.invalidUserIds ?? [], invalidOwnerUnionIds: parsed.invalidOwnerUnionIds ?? [], autoInviteUnavailable: !plan.inviteUser };
+    return {
+      ok: true,
+      chatId: parsed.chatId,
+      creator: plan.creatorLarkAppId,
+      shareLink: typeof parsed.shareLink === 'string' ? parsed.shareLink : undefined,
+      invalidBotIds: parsed.invalidBotIds ?? [],
+      invalidUserIds: parsed.invalidUserIds ?? [],
+      invalidOwnerUnionIds: parsed.invalidOwnerUnionIds ?? [],
+      ownerTransferredTo: parsed.ownerTransferredTo ?? null,
+      transferError: parsed.transferError ?? null,
+      notifyMessageId: parsed.notifyMessageId ?? null,
+      notifyError: parsed.notifyError ?? null,
+      autoInviteUnavailable: !plan.inviteUser,
+    };
   } catch {
     return { ok: false, error: 'group_create_proxy_failed' };
+  }
+}
+
+async function transferTeamGroupOwner(args: {
+  creatorLarkAppId: string;
+  chatId: string;
+  transferOwnerUnionId: string;
+}): Promise<TeamGroupOwnerTransferResult> {
+  try {
+    const upstream = await proxyToDaemon(args.creatorLarkAppId, '/api/groups/transfer-owner', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: args.chatId, ownerUnionId: args.transferOwnerUnionId }),
+    });
+    const parsed = await upstream.json().catch(() => null) as any;
+    if (!upstream.ok || !parsed?.ok) {
+      return {
+        ownerTransferredTo: null,
+        transferError: parsed?.error ?? `owner_transfer_http_${upstream.status}`,
+      };
+    }
+    return {
+      ownerTransferredTo: parsed.ownerTransferredTo ?? null,
+      transferError: parsed.transferError ?? null,
+      notifyMessageId: parsed.notifyMessageId ?? null,
+      notifyError: parsed.notifyError ?? null,
+    };
+  } catch {
+    return { ownerTransferredTo: null, transferError: 'owner_transfer_proxy_failed' };
   }
 }
 
@@ -1518,7 +1629,7 @@ async function createLifecycleGroupForWebhook(
   const allowed = creator.resolvedAllowedUsers ?? [];
   const ownerUnionIds = allowed.filter(u => u.startsWith('on_'));
   const userOpenIds = allowed.filter(u => u.startsWith('ou_'));
-  const upstream = await fetch(`http://127.0.0.1:${creator.ipcPort}/api/groups/create`, {
+  const upstream = await fetchDaemonIpc(creator.ipcPort, '/api/groups/create', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -1552,7 +1663,7 @@ async function buildGroupsMatrix(): Promise<{ chats: any[]; bots: any[] }> {
     .sort((a, b) => a.botIndex - b.botIndex);
   await Promise.all(onlineBots.map(async d => {
     try {
-      const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/groups`);
+      const r = await fetchDaemonIpc(d.ipcPort, '/api/groups');
       if (!r.ok) return;
       const j = await r.json() as { chats?: any[] };
       for (const c of j.chats ?? []) {
@@ -1802,7 +1913,7 @@ async function dashboardSkillReferencesMany(skillNames: readonly string[]): Prom
   const onlineBots = [...registry.list()].sort((a, b) => a.botIndex - b.botIndex);
   const onlineConfigs = await Promise.all(onlineBots.map(async d => {
     try {
-      const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/bot-default-oncall`, {
+      const r = await fetchDaemonIpc(d.ipcPort, '/api/bot-default-oncall', {
         signal: AbortSignal.timeout(1_500),
       });
       if (!r.ok) return null;
@@ -1867,8 +1978,8 @@ const server = createServer(async (req, res) => {
     // proxy on proxyBasePort+idx), so we resolve the session's owning daemon's
     // proxy port from the aggregator rows and forward there, streaming the
     // response straight back. Mounted before the dashboard auth gate because the
-    // terminal proxy / worker enforces its own write gate (read-only without
-    // token / platform role).
+    // worker independently requires a view/write capability or authenticated
+    // dashboard cookie before serving either HTTP or WebSocket terminal data.
     if (url.pathname === '/s' || url.pathname.startsWith('/s/')) {
       const sessionId = parseTerminalSessionId(url.pathname);
       const tport = sessionId ? aggregator.terminalProxyPortOf(sessionId) : undefined;
@@ -1905,7 +2016,7 @@ const server = createServer(async (req, res) => {
     // Federation HUB endpoints — cross-deployment, self-authed by invite code /
     // syncToken, so mounted before the token gate (like webhook/team routes).
     // createTeamGroup injected for the delegate-group path (hub→spoke 拉群).
-    if (await handleFederationApi(req, res, url, { createTeamGroup, liveBots })) {
+    if (await handleFederationApi(req, res, url, { createTeamGroup, transferTeamGroupOwner, liveBots })) {
       return;
     }
 
@@ -2535,7 +2646,7 @@ const server = createServer(async (req, res) => {
     }
 
     // Federation SPOKE endpoints (owner actions) — token-gated above.
-    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup, liveBots })) {
+    if (await handleFederationSpokeApi(req, res, url, { createTeamGroup, transferTeamGroupOwner, liveBots })) {
       return;
     }
 
@@ -2814,7 +2925,7 @@ const server = createServer(async (req, res) => {
       const sid = decodeURIComponent(m[1]);
       const owner = aggregator.ownerOf(sid);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
-      const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/write-link`, { method: 'GET', headers: signDaemonTokenHeaders() });
+      const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/write-link`, { method: 'GET' });
       res.writeHead(upstream.status, { 'content-type': 'application/json' });
       res.end(await upstream.text());
       return;
@@ -2933,6 +3044,28 @@ const server = createServer(async (req, res) => {
     }
 
     // ─── Profiles (aggregate/proxy to daemon) ─────────────────────────────
+    // ─── 会议角色预设（私有 API：不在 PUBLIC_READ_PATHS，未认证已被 401） ───
+    if (url.pathname === '/api/vc-meeting/consumer-profiles') {
+      if (req.method === 'GET') {
+        const out = await handleVcMeetingConsumerProfilesGet(
+          url.searchParams.get('listenerBotAppId') ?? '',
+          vcMeetingConsumerProfilesApiDeps(),
+        );
+        return jsonRes(res, out.status, out.body);
+      }
+      if (req.method === 'PUT') {
+        let parsed: unknown;
+        try {
+          parsed = await readJsonBody(req);
+        } catch {
+          return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+        }
+        const out = await handleVcMeetingConsumerProfilesPut(parsed, vcMeetingConsumerProfilesApiDeps());
+        return jsonRes(res, out.status, out.body);
+      }
+      return jsonRes(res, 405, { ok: false, error: 'method_not_allowed' });
+    }
+
     if (req.method === 'GET' && url.pathname === '/api/role-profiles') {
       type RoleProfileAggregate = {
         profileId: string;
@@ -2943,7 +3076,7 @@ const server = createServer(async (req, res) => {
       const merged = new Map<string, RoleProfileAggregate>();
       await Promise.all(registry.list().map(async d => {
         try {
-          const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/role-profiles`);
+          const r = await fetchDaemonIpc(d.ipcPort, '/api/role-profiles');
           if (!r.ok) return;
           const j = await r.json() as { profiles?: any[]; larkAppId?: string };
           for (const p of j.profiles ?? []) {
@@ -3041,7 +3174,10 @@ const server = createServer(async (req, res) => {
       const byBot = new Map<string, RoleProfileEntryAggregate>();
       await Promise.all(registry.list().map(async d => {
         try {
-          const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/role-profiles/${encodeURIComponent(profileId)}`);
+          const r = await fetchDaemonIpc(
+            d.ipcPort,
+            `/api/role-profiles/${encodeURIComponent(profileId)}`,
+          );
           if (!r.ok) return;
           const j = await r.json() as { entries?: any[] };
           for (const entry of j.entries ?? []) {
@@ -3138,7 +3274,7 @@ const server = createServer(async (req, res) => {
       const onlineBots = [...registry.list()].map(b => withConfiguredCliId(b, agentFields)).sort((a, b) => a.botIndex - b.botIndex);
       const out = await Promise.all(onlineBots.map(async d => {
         try {
-          const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/bot-default-oncall`);
+          const r = await fetchDaemonIpc(d.ipcPort, '/api/bot-default-oncall');
           if (!r.ok) {
             return botDefaultsPayload(d, undefined, `http_${r.status}`);
           }
@@ -3607,8 +3743,9 @@ const server = createServer(async (req, res) => {
           : undefined,
         roleProfileId: roleProfileId ?? undefined,
       };
-      const upstream = await fetch(
-        `http://127.0.0.1:${creator.ipcPort}/api/groups/create`,
+      const upstream = await fetchDaemonIpc(
+        creator.ipcPort,
+        '/api/groups/create',
         { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(forwardBody) },
       );
       const upstreamText = await upstream.text();

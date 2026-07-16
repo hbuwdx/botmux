@@ -45,6 +45,7 @@ import { createOhMyPiAdapter } from '../src/adapters/cli/oh-my-pi.js';
 import { createKimiAdapter } from '../src/adapters/cli/kimi.js';
 import { createGrokAdapter } from '../src/adapters/cli/grok.js';
 import { createKiroCliAdapter } from '../src/adapters/cli/kiro-cli.js';
+import { buildBotmuxShellHints, buildBotmuxSystemPromptText } from '../src/adapters/cli/shared-hints.js';
 import type { CliAdapter, CliId, PtyHandle } from '../src/adapters/cli/types.js';
 
 // ---------------------------------------------------------------------------
@@ -206,6 +207,19 @@ describe('claude-code buildArgs', () => {
     expect(prompt).toContain('第二行');
     expect(prompt).toContain('botmux send "第一行\\n第二行"');
     expect(prompt).toContain('字面量');
+    expect(prompt).toContain('JSON.stringify');
+    expect(prompt).toContain('--content-file');
+  });
+
+  it('keeps English system and inline shell hints aligned on raw multiline input', () => {
+    const systemPrompt = buildBotmuxSystemPromptText({ locale: 'en' });
+    const shellHints = buildBotmuxShellHints('en').join('\n');
+    for (const prompt of [systemPrompt, shellHints]) {
+      expect(prompt).toContain('JSON.stringify');
+      expect(prompt).toContain('JSON-escaped text as a positional argument');
+      expect(prompt).toContain('literal `\\n` back into newlines');
+      expect(prompt).toContain('--content-file');
+    }
   });
 
   it('passes configured model with --model', () => {
@@ -1529,6 +1543,19 @@ describe('buildResumeCommand', () => {
       .toBe('grok --resume bm-grok');
   });
 
+});
+
+describe('native session rename capability', () => {
+  it('is declared only by the verified Codex and Claude Code adapters', () => {
+    expect(createCodexAdapter('/bin/codex').buildSessionRenameCommand?.('新的标题'))
+      .toBe('/rename 新的标题');
+    expect(createClaudeCodeAdapter('/bin/claude').buildSessionRenameCommand?.('new title'))
+      .toBe('/rename new title');
+
+    expect(createCliAdapterSync('seed', '/bin/true').buildSessionRenameCommand).toBeUndefined();
+    expect(createCodexAppAdapter('/bin/codex').buildSessionRenameCommand).toBeUndefined();
+    expect(createCocoAdapter('/bin/coco').buildSessionRenameCommand).toBeUndefined();
+  });
 });
 
 describe('grok buildArgs', () => {

@@ -33,7 +33,7 @@ import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTa
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus, resolveUserToken, DOC_COMMENT_OAUTH_SCOPES } from '../utils/user-token.js';
-import { listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
+import { DocSubscriptionPermissionError, listDocComments, resolveDocFile, subscribeDocFile, unsubscribeDocFile } from '../im/lark/doc-comment.js';
 import { parseDocWatchCommand } from './doc-watch-command.js';
 import { latestDocCommentPollCursor } from './doc-comment-poller.js';
 import {
@@ -71,6 +71,9 @@ import { sessionKey, sessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
 import { t, localeForBot, type Locale } from '../i18n/index.js';
 import { runSkillsImCommand } from './skills/im-command.js';
+import { fetchDaemonIpc } from './daemon-ipc-auth.js';
+import { updateSessionTitle } from './session-title.js';
+import { requestAgentSessionRename } from './session-rename.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
@@ -91,6 +94,18 @@ export { DAEMON_COMMANDS, PASSTHROUGH_COMMANDS };
  * that pollutes the dashboard's session list. Handle them without a session.
  */
 export const SESSIONLESS_DAEMON_COMMANDS = new Set(['/group', '/g', '/list-slash-command', '/slash', '/botconfig', '/dashboard', '/skills', '/vc-auth', '/watch-comment']);
+
+/**
+ * Daemon commands that operate on an ALREADY-EXISTING session and must never
+ * pre-create one. `/rename` renames the current session — with no session there
+ * is nothing to rename, so the daemon routes must skip their generic
+ * "createSession + activeSessions.set(worker:null)" pre-create block and let
+ * handleCommand's `!ds` branch reply no_active_session. Without this, `/rename`
+ * in a brand-new topic (or a thread with no session) would spawn a phantom
+ * worker:null session just to rename it, polluting the dashboard. (Same class
+ * of fix as the `/card` / `/term` special cases in daemon.ts.)
+ */
+export const EXISTING_SESSION_ONLY_DAEMON_COMMANDS = new Set(['/rename']);
 
 export function resolveAdapterDefaultPassthroughCommands(larkAppId?: string): string[] {
   if (!larkAppId) return [];
@@ -1355,6 +1370,37 @@ export async function handleCommand(
         break;
       }
 
+      case '/rename': {
+        if (!ds) {
+          await sessionReply(rootId, t('cmd.no_active_session', undefined, loc));
+          break;
+        }
+        const rawTitle = message.content.replace(/^\/rename\s*/i, '').trim();
+        if (!rawTitle) {
+          await sessionReply(rootId, t('cmd.rename.usage', undefined, loc));
+          break;
+        }
+        const updated = updateSessionTitle(ds.session, rawTitle);
+        if (!updated.ok) {
+          await sessionReply(rootId, t('cmd.rename.usage', undefined, loc));
+          break;
+        }
+        const agentSync = requestAgentSessionRename(ds, updated.title);
+        const cliName = getCliDisplayName(agentSync.cliId ?? ds.session.cliId ?? 'claude-code');
+        if (agentSync.status === 'requested') {
+          await sessionReply(rootId, t('cmd.rename.updated_requested', { title: updated.title, cliName }, loc));
+        } else if (agentSync.status === 'not_running') {
+          await sessionReply(rootId, t('cmd.rename.updated_not_running', { title: updated.title }, loc));
+        } else if (agentSync.status === 'unsupported') {
+          await sessionReply(rootId, t('cmd.rename.updated_unsupported', { title: updated.title, cliName }, loc));
+        } else {
+          await sessionReply(rootId, t('cmd.rename.updated_failed', { title: updated.title, cliName }, loc));
+          logger.warn(`[${logTag}] Native session rename request failed for ${cliName}: ${agentSync.error}`);
+        }
+        logger.info(`[${logTag}] Session renamed by /rename: ${updated.title} (agentSync=${agentSync.status})`);
+        break;
+      }
+
       case '/repo': {
         const repoArg = message.content.replace(/^\/repo\s*/, '').trim();
 
@@ -1955,7 +2001,21 @@ export async function handleCommand(
           ));
           logger.info(`[${logTag}] /subscribe-lark-doc → ${file.fileType}:${file.fileToken.slice(0, 12)} mode=${mode}${rebound ? ' (rebound)' : ''}`);
         } catch (err) {
-          if (err instanceof UserTokenMissingError) {
+          // 1069603 重新 OAuth 无法修复；保留实际返回该业务码的身份，避免把
+          // tenant-only 失败误归因到当前用户。只有 token 缺失 / 失效才重新授权。
+          if (err instanceof DocSubscriptionPermissionError) {
+            const identity = err.source === 'user'
+              ? t('cmd.subdoc.permission_identity_user', undefined, loc)
+              : err.source === 'tenant'
+                ? t('cmd.subdoc.permission_identity_tenant', undefined, loc)
+                : err.source === 'both'
+                  ? t('cmd.subdoc.permission_identity_both', undefined, loc)
+                  : t('cmd.subdoc.permission_identity_unknown', undefined, loc);
+            await sessionReply(rootId, t('cmd.subdoc.manage_required', {
+              code: err.larkCode,
+              identity,
+            }, loc));
+          } else if (err instanceof UserTokenMissingError) {
             await replyDocLogin();
           } else {
             await sessionReply(rootId, t('cmd.subdoc.failed', { err: err instanceof Error ? err.message : String(err) }, loc));
@@ -2814,8 +2874,9 @@ export async function handleCommand(
           try {
             const ctrl = new AbortController();
             const tt = setTimeout(() => ctrl.abort(), 5000);
-            const res = await fetch(
-              `http://127.0.0.1:${daemon.ipcPort}/api/sessions/migrate-to-chat`,
+            const res = await fetchDaemonIpc(
+              daemon.ipcPort,
+              '/api/sessions/migrate-to-chat',
               {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
@@ -2996,6 +3057,7 @@ export async function handleCommand(
           t('help.repo_n', undefined, loc),
           t('help.repo_path', undefined, loc),
           t('help.repo_wt', undefined, loc),
+          t('help.rename', undefined, loc),
           t('help.status', undefined, loc),
           t('help.card', undefined, loc),
           t('help.term', undefined, loc),

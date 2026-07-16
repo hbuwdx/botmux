@@ -27,7 +27,7 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
 import { resolveSessionContext } from './core/session-marker.js';
 import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic, resolveReportTarget, resolveSendTarget } from './core/dispatch.js';
@@ -77,7 +77,8 @@ import {
   resolveGlobalInstallPlan,
   UnsupportedGlobalInstallError,
 } from './utils/global-install.js';
-import { loadDashboardSecret } from './dashboard/auth.js';
+import { fetchDaemonIpc, loadDaemonIpcSecret } from './core/daemon-ipc-auth.js';
+import { readManagedOriginCapability } from './core/managed-origin-capability.js';
 import { rejectLikelyWindowsStdinMojibake, decodeStdinBytes } from './cli/stdin-encoding.js';
 import {
   formatBotInfoEntriesForCli,
@@ -106,6 +107,18 @@ import {
 import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
 import { writeManualIntentIfAbsentTo } from './services/restart-intent-store.js';
 import { stripLegacyPendingCardFields } from './services/session-store.js';
+import {
+  evaluateVcMeetingManagedSend,
+  isTrustedVcMeetingHostRelayParent,
+  resolveVcMeetingImTurnOrigin,
+  type VcMeetingManagedSendOrigin,
+} from './services/vc-meeting-send-policy.js';
+import {
+  finishVcMeetingImReply,
+  prepareVcMeetingDeliveryReply,
+  prepareVcMeetingImReply,
+} from './services/vc-meeting-im-reply.js';
+import { recordVcMeetingListenerMessage } from './services/vc-meeting-listener-message-store.js';
 import { isValidPluginId, normalizePluginIdList } from './core/plugins/ids.js';
 import { resolveEffectivePluginIds, updateBotPluginOverride } from './core/plugins/effective.js';
 import {
@@ -2711,6 +2724,12 @@ interface SessionData {
   /** 'thread' (legacy default) → cmdSend uses reply_in_thread to rootMessageId.
    *  'chat' → cmdSend posts a plain message to chatId (普通群整群一个会话). */
   scope?: 'thread' | 'chat';
+  vcMeetingReceiver?: {
+    listenerAppId: string;
+    meetingId: string;
+    memberId: string;
+    memberEpoch: number;
+  };
   title: string;
   status: 'active' | 'closed';
   createdAt: string;
@@ -3608,8 +3627,9 @@ async function cmdSuspend(): Promise<void> {
       continue;
     }
     try {
-      const res = await fetch(
-        `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(s.sessionId)}/suspend`,
+      const res = await fetchDaemonIpc(
+        daemon.ipcPort,
+        `/api/sessions/${encodeURIComponent(s.sessionId)}/suspend`,
         { method: 'POST' },
       );
       const body: any = await res.json().catch(() => ({}));
@@ -3685,7 +3705,7 @@ async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Prom
   }
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/start`, {
+    res = await fetchDaemonIpc(daemon.ipcPort, `/api/v3/runs/${encodeURIComponent(runId)}/start`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: '{}',
@@ -3719,7 +3739,7 @@ async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Prom
   }
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/retry`, {
+    res = await fetchDaemonIpc(daemon.ipcPort, `/api/v3/runs/${encodeURIComponent(runId)}/retry`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(nodeId ? { nodeId } : {}),
@@ -3757,7 +3777,7 @@ async function cmdWorkflowGrant(runId: string | undefined, rest: string[]): Prom
   }
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/grant`, {
+    res = await fetchDaemonIpc(daemon.ipcPort, `/api/v3/runs/${encodeURIComponent(runId)}/grant`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(loopId ? { loopId } : {}),
@@ -3833,8 +3853,9 @@ async function cmdResume(): Promise<void> {
 
   let res: Response;
   try {
-    res = await fetch(
-      `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(session.sessionId)}/resume`,
+    res = await fetchDaemonIpc(
+      daemon.ipcPort,
+      `/api/sessions/${encodeURIComponent(session.sessionId)}/resume`,
       { method: 'POST' },
     );
   } catch (err: any) {
@@ -3927,27 +3948,12 @@ async function cmdTermLink(rest: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const SECRET_PATH = join(CONFIG_DIR, '.dashboard-secret');
-  let secret: string | null;
-  try {
-    secret = loadDashboardSecret(SECRET_PATH);
-  } catch (e) {
-    console.error(`❌ 无法读取 .dashboard-secret：${(e as Error).message}`);
-    process.exit(1);
-  }
-  if (!secret) {
-    console.error('❌ 缺少或为空 .dashboard-secret（daemon 未初始化）。先 `botmux restart`。');
-    process.exit(1);
-  }
-  const ts = Math.floor(Date.now() / 1000).toString();
-  const nonce = randomBytes(8).toString('hex');
-  const sig = createHmac('sha256', secret).update(`${ts}:${nonce}`).digest('base64url');
-
   let res: Response;
   try {
-    res = await fetch(
-      `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(session.sessionId)}/write-link-card`,
-      { method: 'POST', headers: { 'X-Botmux-Cli-Ts': ts, 'X-Botmux-Cli-Nonce': nonce, 'X-Botmux-Cli-Auth': sig } },
+    res = await fetchDaemonIpc(
+      daemon.ipcPort,
+      `/api/sessions/${encodeURIComponent(session.sessionId)}/write-link-card`,
+      { method: 'POST' },
     );
   } catch (err: any) {
     console.error(`❌ 无法连接到 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
@@ -4128,8 +4134,17 @@ botmux skills 注入方式（仅影响 codex/gemini/opencode 等只支持全局 
  * backgrounded/deeply-nested invocations). See resolveSessionContext for why
  * the env fallback is safe.
  */
-function findAncestorSessionContext(): { sessionId: string; turnId?: string } | null {
-  return resolveSessionContext(resolveDataDir(), process.env.BOTMUX_SESSION_ID);
+function findAncestorSessionContext(): { sessionId: string; turnId?: string; dispatchAttempt?: number } | null {
+  const resolved = resolveSessionContext(resolveDataDir(), process.env.BOTMUX_SESSION_ID);
+  if (!resolved) return null;
+  const envAttempt = Number(process.env.BOTMUX_DISPATCH_ATTEMPT);
+  const dispatchAttempt = resolved.dispatchAttempt
+    ?? (Number.isSafeInteger(envAttempt) && envAttempt > 0 ? envAttempt : undefined);
+  return {
+    ...resolved,
+    turnId: resolved.turnId ?? process.env.BOTMUX_TURN_ID,
+    ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
+  };
 }
 
 function findAncestorSessionId(): string | null {
@@ -4925,7 +4940,17 @@ import { buildImageCardElements, brandFooterSegment, prepareCardMarkdown, type L
 import { applyInlineMentions } from './im/lark/inline-mentions.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
-import { resolveQuoteTarget, validateMentionDecision, parseAttentionFlag, attentionUsageError } from './services/send-policy.js';
+import {
+  resolveQuoteTarget,
+  validateMentionDecision,
+  parseAttentionFlag,
+  attentionUsageError,
+  managedVcQuoteError,
+  managedVcCustomCardError,
+  managedVcSendControlError,
+  managedVcSendPayloadError,
+  containsLarkAtTag,
+} from './services/send-policy.js';
 
 /**
  * Sandbox relay mode for `botmux send`. Inside a file-sandbox the CLI cannot
@@ -4935,7 +4960,10 @@ import { resolveQuoteTarget, validateMentionDecision, parseAttentionFlag, attent
  * worker's creds. Forward the argv verbatim (content via a file in the shared
  * outbox), then block on the response file and mirror its result.
  */
-async function relaySend(rest: string[], relayDir: string): Promise<void> {
+async function relaySend(
+  rest: string[],
+  relayDir: string,
+): Promise<void> {
   const sid = argValue(rest, '--session-id') ?? process.env.BOTMUX_SESSION_ID;
   if (!sid) { console.error('relay: 无法确定 session-id'); process.exit(1); }
   const cardJsonArg = argValue(rest, '--card-json');
@@ -4971,6 +4999,11 @@ async function relaySend(rest: string[], relayDir: string): Promise<void> {
     ? prepareCardMarkdown(extractCardText(content), process.cwd(), 'filesystem')
     : undefined;
   const id = randomBytes(8).toString('hex');
+  const originCapability = readManagedOriginCapability(
+    resolveDataDir(),
+    sid,
+    relayDir,
+  )?.capability;
   // Structured request: the daemon-side watcher rebuilds the argv from these
   // validated fields (it NEVER executes raw argv — see buildRelayHostArgs).
   // Content + attachments are written into the shared outbox as plain
@@ -5036,6 +5069,7 @@ async function relaySend(rest: string[], relayDir: string): Promise<void> {
     videos,
     videoCovers,
     flags,
+    ...(originCapability ? { originCapability } : {}),
   }));
 
   const resPath = join(relayDir, `${id}.res.json`);
@@ -5166,15 +5200,11 @@ function riffModeSession(opts: { evenWithLocalSessions?: boolean } = {}): { sess
 }
 
 async function cmdSend(rest: string[]): Promise<void> {
-  // Sandbox relay: a file-sandboxed session has no creds/bots.json, so route
-  // the send through the daemon-side outbox instead of delivering directly.
-  const relayDir = process.env.BOTMUX_SEND_RELAY;
-  if (relayDir) { await relaySend(rest, relayDir); return; }
-  // Safety gate: a CLI agent running inside a workflow subagent (Slice F)
-  // must not chat-post directly — chat-facing side effects are reserved
-  // for `hostExecutor` activities so they can be tracked via
-  // `effectAttempted` + reconciled across retries / resumes.  Refuse loud
-  // so the agent (and any human reviewing logs) sees the boundary.
+  const ancestorCtx = findAncestorSessionContext();
+  // Workflow subagents cannot own chat-facing effects: those belong to a
+  // hostExecutor so retries/resumes can reconcile them. Keep this gate ahead
+  // of both the sandbox relay and VC-origin store reads; neither path may turn
+  // a forbidden workflow send into an observable side effect.
   if (process.env.BOTMUX_WORKFLOW === '1') {
     const runId = process.env.BOTMUX_WORKFLOW_RUN_ID ?? '?';
     const nodeId = process.env.BOTMUX_WORKFLOW_NODE_ID ?? '?';
@@ -5185,11 +5215,131 @@ async function cmdSend(rest: string[]): Promise<void> {
     );
     process.exit(2);
   }
+  // Managed output attribution must come from the live process-tree marker,
+  // whose turn/attempt is refreshed by the worker. BOTMUX_TURN_ID is a
+  // spawn-time fallback and can be stale in a detached child after a later
+  // delivery starts, so it is never authority for receiver policy.
+  const liveMarkerCtx = resolveSessionContext(
+    resolveDataDir(),
+    process.env.BOTMUX_SESSION_ID,
+  );
+  const trustedHostRelay = process.env.BOTMUX_HOST_RELAY_AUTHORIZED === '1';
+  const trustedRelayAttemptRaw = Number(process.env.BOTMUX_DISPATCH_ATTEMPT);
+  const trustedRelayCandidate = trustedHostRelay && process.env.BOTMUX_SESSION_ID
+    ? {
+        sessionId: process.env.BOTMUX_SESSION_ID,
+        turnId: process.env.BOTMUX_TURN_ID,
+        dispatchAttempt: Number.isSafeInteger(trustedRelayAttemptRaw) && trustedRelayAttemptRaw > 0
+          ? trustedRelayAttemptRaw
+          : undefined,
+      }
+    : undefined;
+  const sessionIdArg = argValue(rest, '--session-id');
+  // Inside bwrap the PID namespace makes host marker traversal impossible.
+  // The relay watcher therefore binds a short-lived host-issued capability to
+  // the worker's live turn and performs the authoritative policy check.
+  const relayDir = process.env.BOTMUX_SEND_RELAY;
+  if (relayDir) {
+    await relaySend(rest, relayDir);
+    return;
+  }
+  // Silent is an execution policy, not a prompt suggestion. During a durable
+  // meeting turn, refuse botmux-mediated sends before either the direct-Lark or
+  // sandbox-relay path can run. Explicit human IM turns have no dispatchAttempt
+  // and therefore retain the normal reply path in the same receiver session.
+  const sessionsForOrigin = loadSessions();
+  const trustedRelaySession = trustedRelayCandidate
+    ? sessionsForOrigin.get(trustedRelayCandidate.sessionId)
+    : undefined;
+  // The env marker is not authority by itself. A genuine host relay CLI is a
+  // direct child of the session's durably recorded worker pid; sandboxed or
+  // semi-trusted descendants cannot satisfy that parent binding.
+  const trustedRelayCtx = trustedRelayCandidate && isTrustedVcMeetingHostRelayParent(
+    trustedHostRelay,
+    trustedRelaySession?.pid,
+    process.ppid,
+  )
+    ? trustedRelayCandidate
+    : undefined;
+  const originSessionId = trustedRelayCtx?.sessionId
+    || liveMarkerCtx?.sessionId
+    || ancestorCtx?.sessionId
+    || sessionIdArg;
+  let explicitVcMeetingImOrigin: ReturnType<typeof resolveVcMeetingImTurnOrigin>;
+  let vcMeetingListenerOutputOwner: { listenerAppId: string; meetingId: string } | undefined;
+  let vcMeetingManagedSendOrigin: VcMeetingManagedSendOrigin | undefined;
+  let vcMeetingDeliveryReplyOrigin: {
+    receiverSessionId: string;
+    stableTurnId: string;
+    dispatchAttempt: number;
+  } | undefined;
+  if (originSessionId) {
+    const originSession = sessionsForOrigin.get(originSessionId);
+    const originTurnId = trustedRelayCtx?.turnId ?? liveMarkerCtx?.turnId;
+    const imOrigin = resolveVcMeetingImTurnOrigin(originSession, originTurnId);
+    const managedOrigin: VcMeetingManagedSendOrigin = {
+      receiverSessionId: originSessionId,
+      receiverSession: !!originSession?.vcMeetingReceiver,
+      turnId: originTurnId,
+      dispatchAttempt: trustedRelayCtx?.dispatchAttempt ?? liveMarkerCtx?.dispatchAttempt,
+      currentImTurnOrigin: imOrigin,
+    };
+    const decision = evaluateVcMeetingManagedSend(resolveDataDir(), managedOrigin);
+    if (!decision.ok) {
+      console.error(
+        `botmux send refused by VC managed-output policy (${decision.errorCode}): ${decision.error}`,
+      );
+      process.exit(2);
+    }
+    if (decision.kind === 'listener_thread') {
+      vcMeetingListenerOutputOwner = decision.meetingOwner;
+      vcMeetingManagedSendOrigin = managedOrigin;
+      if (managedOrigin.turnId && managedOrigin.dispatchAttempt !== undefined) {
+        vcMeetingDeliveryReplyOrigin = {
+          receiverSessionId: originSessionId,
+          stableTurnId: managedOrigin.turnId,
+          dispatchAttempt: managedOrigin.dispatchAttempt,
+        };
+      }
+    }
+    if (decision.kind === 'listener_thread'
+      && (trustedRelayCtx?.dispatchAttempt ?? liveMarkerCtx?.dispatchAttempt) === undefined) {
+      explicitVcMeetingImOrigin = imOrigin;
+    }
+  }
+  const revalidateVcMeetingManagedSend = (): void => {
+    if (!vcMeetingManagedSendOrigin) return;
+    const decision = evaluateVcMeetingManagedSend(resolveDataDir(), vcMeetingManagedSendOrigin);
+    if (!decision.ok) {
+      throw new Error(
+        `VC managed-output authority expired (${decision.errorCode}): ${decision.error}`,
+      );
+    }
+    if (decision.kind !== 'listener_thread') {
+      throw new Error('VC managed-output authority no longer targets the listener thread');
+    }
+    vcMeetingListenerOutputOwner = decision.meetingOwner;
+  };
+  const prepareVcMeetingListenerReply = (
+    proposedOutput: {
+      targetChatId: string;
+      quoteTargetId?: string;
+      msgType: string;
+      content: string;
+    },
+  ) => explicitVcMeetingImOrigin
+    ? prepareVcMeetingImReply(resolveDataDir(), explicitVcMeetingImOrigin, proposedOutput)
+    : vcMeetingDeliveryReplyOrigin
+      ? prepareVcMeetingDeliveryReply(
+          resolveDataDir(),
+          vcMeetingDeliveryReplyOrigin,
+          proposedOutput,
+        )
+      : undefined;
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
   // Read isolation: the sandboxed CLI is denied bots.json → register this bot
   // from its own worker-written cred file instead (see registerSelfFromCredFile).
   await registerSelfFromCredFile();
-  const sessionIdArg = argValue(rest, '--session-id');
   for (const flag of ['--video', '--videos', '--video-cover', '--video-covers']) {
     if (flagPresentButValueMissing(rest, flag, true)) {
       console.error(`botmux send: ${flag} 需要路径参数`);
@@ -5207,6 +5357,14 @@ async function cmdSend(rest: string[]): Promise<void> {
   const cardJsonArg = argValue(rest, '--card-json');
   const cardFile = argValue(rest, '--card-file');
   const customCardRequested = cardJsonArg !== undefined || cardFile !== undefined;
+  const managedCustomCardError = managedVcCustomCardError(
+    !!vcMeetingManagedSendOrigin,
+    customCardRequested,
+  );
+  if (managedCustomCardError) {
+    console.error(`botmux send refused for a managed VC turn: ${managedCustomCardError}`);
+    process.exit(2);
+  }
   if (cardJsonArg !== undefined && cardFile !== undefined) {
     console.error('botmux send: --card-json 与 --card-file 不能同时使用');
     process.exit(2);
@@ -5263,6 +5421,16 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Quote chain (chat scope): --quote <message_id> overrides the auto target,
   // --no-quote forces a plain (un-quoted) send.
   const explicitQuote = argValue(rest, '--quote');
+  const managedQuoteError = managedVcQuoteError({
+    managed: !!vcMeetingManagedSendOrigin,
+    durableDelivery: !!vcMeetingDeliveryReplyOrigin,
+    explicitImMessageId: explicitVcMeetingImOrigin?.larkMessageId,
+    explicitQuote,
+  });
+  if (managedQuoteError) {
+    console.error(`botmux send refused for a managed VC turn: ${managedQuoteError}`);
+    process.exit(2);
+  }
   const noQuote = rest.includes('--no-quote');
   // @ hard-gate: every reply must explicitly choose one of these.
   const mentionBack = rest.includes('--mention-back');
@@ -5271,12 +5439,25 @@ async function cmdSend(rest: string[]): Promise<void> {
   // needs-you column for this session. Parsed specially (not argValue) so a bare
   // `--attention "我卡住了"` doesn't eat the message as the flag value.
   const attention = parseAttentionFlag(rest);
+  const managedControlError = managedVcSendControlError({
+    managed: !!vcMeetingManagedSendOrigin,
+    sendTopLevel,
+    overrideChatId,
+    sendInto,
+    attentionRequested: attention.requested,
+    explicitMentionCount: mentionArgs.length,
+    mentionBack,
+    noMention,
+  });
+  if (managedControlError) {
+    console.error(`botmux send refused for a managed VC turn: ${managedControlError}`);
+    process.exit(2);
+  }
   if (customCardRequested && asVoice) {
     console.error('botmux send: --card-file/--card-json 不能与 --voice 混用');
     process.exit(2);
   }
 
-  const ancestorCtx = findAncestorSessionContext();
   const sid = sessionIdArg ?? ancestorCtx?.sessionId ?? process.env.BOTMUX_SESSION_ID ?? null;
   if (!sid) {
     console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
@@ -5343,6 +5524,20 @@ async function cmdSend(rest: string[]): Promise<void> {
   }
   if (!contentFile && !customCardRequested) rejectLikelyWindowsStdinMojibake(content);
 
+  const managedPayloadError = managedVcSendPayloadError({
+    managed: !!vcMeetingManagedSendOrigin,
+    asVoice,
+    hasBodyText: !!content.trim(),
+    imageCount: images.length,
+    fileCount: files.length,
+    videoCount: videoAttachments.length,
+    containsNativeAtTag: containsLarkAtTag(content),
+  });
+  if (managedPayloadError) {
+    console.error(`botmux send refused for a managed VC turn: ${managedPayloadError}`);
+    process.exit(2);
+  }
+
   if (!customCard && !content.trim() && images.length === 0 && files.length === 0 && videoAttachments.length === 0) {
     console.error('没有内容可发送。用法:\n  echo "消息" | botmux send\n  botmux send "消息"\n  botmux send --content-file /tmp/msg.md --images /tmp/chart.png\n  botmux send --videos /tmp/replay.mp4 --video-covers /tmp/cover.png --no-mention "视频预览"');
     process.exit(1);
@@ -5360,6 +5555,29 @@ async function cmdSend(rest: string[]): Promise<void> {
   });
   if (attentionErr) { console.error(`botmux send: ${attentionErr}`); process.exit(2); }
 
+  const recordVcMeetingPrimaryOutput = (
+    messageId: string,
+    outputChatId: string,
+  ): void => {
+    if (!vcMeetingListenerOutputOwner || sendInto) return;
+    try {
+      const recorded = recordVcMeetingListenerMessage(resolveDataDir(), {
+        ...vcMeetingListenerOutputOwner,
+        targetChatId: outputChatId,
+        messageId,
+      });
+      if (!recorded.ok) {
+        console.error(`⚠️ VC 监听消息索引拒绝记录 ${messageId}（${recorded.reason}）`);
+      }
+    } catch (error) {
+      // The primary message already exists at Lark. Index failure must never
+      // turn a successful send into exit!=0 (which would invite a duplicate).
+      console.error(
+        `⚠️ 消息已发送，但 VC 监听消息索引写入失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
   // ── Voice mode ──────────────────────────────────────────────────────────
   // Synthesize the (already-condensed, colloquial) content into a Feishu voice
   // bubble and return. Deliberately bypasses the text/card path's mentions,
@@ -5375,18 +5593,71 @@ async function cmdSend(rest: string[]): Promise<void> {
     const { rmSync } = await import('node:fs');
     const appId = s.larkAppId!;
     const targetChatId = overrideChatId ?? s.chatId;
-    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
-    const sendAudio = (fileKey: string): Promise<string> =>
-      target.mode === 'plain'
-        ? sendMessage(appId, target.chatId, JSON.stringify({ file_key: fileKey }), 'audio')
-        : replyMessage(appId, target.rootMessageId, JSON.stringify({ file_key: fileKey }), 'audio', true);
     let dir: string | undefined;
     try {
       const out = await synthesizeVoiceOpus(appId, content);
       dir = out.dir;
       const fileKey = await uploadFile(appId, out.path, { duration: out.durationMs });
       const sentAtMs = Date.now();
-      const messageId = await sendAudio(fileKey);
+      const proposedOutput = {
+        targetChatId,
+        msgType: 'audio',
+        content: JSON.stringify({ file_key: fileKey }),
+      };
+      const prepared = prepareVcMeetingListenerReply(proposedOutput);
+      if (prepared?.kind === 'conflict') {
+        throw new Error(`VC listener assistant reply refused (${prepared.reason}): ${prepared.detail}`);
+      }
+      const canonicalOutput = prepared?.canonicalOutput ?? proposedOutput;
+      if (prepared?.outputMismatch) {
+        console.error(
+          `⚠️ VC listener voice reply output_mismatch action=${prepared.ref.actionId}; `
+          + 'reusing first canonical output',
+        );
+      }
+      let messageId: string;
+      if (prepared?.kind === 'succeeded' && prepared.messageId) {
+        messageId = prepared.messageId;
+      } else {
+        revalidateVcMeetingManagedSend();
+        const canonicalTarget = resolveSendTarget({
+          into: sendInto,
+          topLevel: sendTopLevel,
+          chatScope: s.scope === 'chat',
+          chatId: canonicalOutput.targetChatId,
+          rootMessageId: s.rootMessageId,
+          replyTargetRootId: s.currentReplyTarget?.rootMessageId,
+          replyTargetTurnId: s.currentReplyTarget?.turnId,
+          currentTurnId,
+        });
+        const managedProviderOptions = prepared
+          ? { suppressHook: true }
+          : undefined;
+        messageId = canonicalTarget.mode === 'plain'
+          ? await sendMessage(
+              appId,
+              canonicalTarget.chatId,
+              canonicalOutput.content,
+              canonicalOutput.msgType,
+              prepared?.providerKey,
+              undefined,
+              managedProviderOptions,
+            )
+          : await replyMessage(
+              appId,
+              canonicalTarget.rootMessageId,
+              canonicalOutput.content,
+              canonicalOutput.msgType,
+              true,
+              prepared?.providerKey,
+              undefined,
+              managedProviderOptions,
+            );
+        if (prepared?.kind === 'send' || prepared?.kind === 'succeeded') {
+          finishVcMeetingImReply(resolveDataDir(), prepared.ref, messageId);
+        }
+      }
+      recordVcMeetingPrimaryOutput(messageId, canonicalOutput.targetChatId);
       // 语音也是一次回复：写 bridge fallback marker，否则本轮会被判为"没发 botmux send"
       // 而触发兜底，多补一张文本卡。与文本/卡片路径同口径：仅同话题回复才记。
       if (!sendTopLevel && !overrideChatId && !sendInto) {
@@ -5479,6 +5750,8 @@ async function cmdSend(rest: string[]): Promise<void> {
       mentions.push({ open_id: m.trim(), name: '' });
     }
   }
+  const replyTargetSenderOpenId = explicitVcMeetingImOrigin?.replyTargetSenderOpenId
+    ?? s.quoteTargetSenderOpenId;
 
   // @ hard-gate (config.send.requireMentionDecision, default on): force the
   // model to make an explicit @ decision before sending. --top-level publish
@@ -5489,16 +5762,16 @@ async function cmdSend(rest: string[]): Promise<void> {
     hasMentionArgs: mentionArgs.length > 0,
     mentionBack,
     noMention,
-    hasQuoteTargetSender: !!s.quoteTargetSenderOpenId,
+    hasQuoteTargetSender: !!replyTargetSenderOpenId,
   });
   if (!mentionGate.ok) { console.error(mentionGate.error); process.exit(2); }
 
   // --mention-back: @ the sender of the message this turn is replying to
   // (open_id from the session — model needn't know it). Bare-name form so it
   // renders as a trailing <at>.
-  if (mentionBack && s.quoteTargetSenderOpenId
-      && !mentions.some(m => m.open_id === s.quoteTargetSenderOpenId)) {
-    mentions.push({ open_id: s.quoteTargetSenderOpenId, name: '' });
+  if (mentionBack && replyTargetSenderOpenId
+      && !mentions.some(m => m.open_id === replyTargetSenderOpenId)) {
+    mentions.push({ open_id: replyTargetSenderOpenId, name: '' });
   }
 
   // Validate file paths
@@ -5546,7 +5819,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // NOT reachable in the current conversation; else null. The bot I'm replying to
   // here (quoteTargetSenderOpenId) is reachable, so it's never treated as off-topic.
   const offTopicSubBotSeed = (openId: string): string | null =>
-    offTopicSubBotTopic({ mentionOpenId: openId, quoteTargetSenderOpenId: s.quoteTargetSenderOpenId, chatId: targetChatId, registry: dispatchReg, activeSeeds: dispatchActiveSeeds });
+    offTopicSubBotTopic({ mentionOpenId: openId, quoteTargetSenderOpenId: replyTargetSenderOpenId, chatId: targetChatId, registry: dispatchReg, activeSeeds: dispatchActiveSeeds });
   // Explicit --mention / --mention-back of an off-topic sub-bot → block + point to
   // the right command (--anyway overrides). Prose @Name injection is filtered
   // (dropped, not blocked) at its own site below.
@@ -5579,10 +5852,36 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single
   // decision point. Used for file attachments (always plain in chat scope).
   const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
-  const dispatch = (content: string, msgType: string): Promise<string> =>
-    sendTarget.mode === 'plain'
-      ? sendMessage(appId, sendTarget.chatId, content, msgType, undefined, hookContext)
-      : replyMessage(appId, sendTarget.rootMessageId, content, msgType, true, undefined, hookContext);
+  const dispatch = (
+    content: string,
+    msgType: string,
+    uuid?: string,
+    suppressHook?: boolean,
+  ): Promise<string> => {
+    // This closure also carries attachments, so every Lark call re-checks the
+    // exact durable attempt/member instead of inheriting the early cmd gate.
+    revalidateVcMeetingManagedSend();
+    return sendTarget.mode === 'plain'
+      ? sendMessage(
+          appId,
+          sendTarget.chatId,
+          content,
+          msgType,
+          uuid,
+          hookContext,
+          suppressHook ? { suppressHook: true } : undefined,
+        )
+      : replyMessage(
+          appId,
+          sendTarget.rootMessageId,
+          content,
+          msgType,
+          true,
+          uuid,
+          hookContext,
+          suppressHook ? { suppressHook: true } : undefined,
+        );
+  };
   const recordBridgeSendMarker = (sentAtMs: number, messageId: string, sentContent: string): void => {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
@@ -5601,38 +5900,96 @@ async function cmdSend(rest: string[]): Promise<void> {
   // scope and --top-level never quote. Withdrawn target → fall back to plain.
   const quoteTargetId = sendInto || sendTarget.mode === 'thread' ? undefined : resolveQuoteTarget({
     isChatScope, sendTopLevel, noQuote, explicitQuote,
-    sessionQuoteTargetId: s.quoteTargetId,
+    // A durable meeting delivery has no Lark-authored trigger message. Never
+    // inherit the receiver session's latest human quote target: that state can
+    // belong to another queued IM turn and is not part of the delivery action.
+    sessionQuoteTargetId: vcMeetingDeliveryReplyOrigin
+      ? undefined
+      : explicitVcMeetingImOrigin?.larkMessageId ?? s.quoteTargetId,
   });
   let primaryQuotedId: string | null = null;
+  let vcMeetingListenerReplyReplay = false;
   const dispatchPrimary = async (content: string, msgType: string): Promise<string> => {
+    // `dispatchPrimaryMessage` may call replyMessage directly for a quote, so
+    // fence immediately before preparing/performing that primary effect too.
+    revalidateVcMeetingManagedSend();
+    const proposedOutput = {
+      targetChatId,
+      ...(quoteTargetId ? { quoteTargetId } : {}),
+      msgType,
+      content,
+    };
+    const prepared = prepareVcMeetingListenerReply(proposedOutput);
+    if (prepared?.kind === 'conflict') {
+      throw new Error(`VC listener assistant reply refused (${prepared.reason}): ${prepared.detail}`);
+    }
+    const canonicalOutput = prepared?.canonicalOutput ?? proposedOutput;
+    if (prepared?.outputMismatch) {
+      console.error(
+        `⚠️ VC listener reply output_mismatch action=${prepared.ref.actionId} `
+        + `turn=${explicitVcMeetingImOrigin?.larkMessageId ?? vcMeetingDeliveryReplyOrigin?.stableTurnId}; `
+        + 'reusing first canonical output',
+      );
+    }
+    if (prepared?.kind === 'succeeded' && prepared.messageId) {
+      vcMeetingListenerReplyReplay = true;
+      primaryQuotedId = canonicalOutput.quoteTargetId ?? null;
+      recordVcMeetingPrimaryOutput(prepared.messageId, canonicalOutput.targetChatId);
+      return prepared.messageId;
+    }
+    if (prepared?.kind === 'succeeded') {
+      // A legacy/incomplete terminal record without the provider message id is
+      // still safe to reconcile through the same stable UUID.
+      vcMeetingListenerReplyReplay = true;
+    } else if (prepared?.kind === 'send') {
+      vcMeetingListenerReplyReplay = prepared.replay;
+    }
     const result = await dispatchPrimaryMessage(
       { sendMessage, replyMessage },
       {
         appId,
-        targetChatId,
-        quoteTargetId,
-        content,
-        msgType,
+        targetChatId: canonicalOutput.targetChatId,
+        quoteTargetId: canonicalOutput.quoteTargetId,
+        content: canonicalOutput.content,
+        msgType: canonicalOutput.msgType,
+        ...(prepared ? { uuid: prepared.providerKey } : {}),
+        // Managed meeting output must never fan out through user-configured
+        // outbound hooks, including its first provider attempt.
+        ...(prepared ? { suppressHook: true } : {}),
         hookContext,
         MessageWithdrawnError,
-        dispatch,
+        // Explicit VC IM --into is rejected above, so an unquoted first send
+        // retains the normal chat-scope dispatch semantics. On a mismatch the
+        // frozen canonical target remains authoritative.
+        dispatch: prepared?.outputMismatch
+          ? (body, type, uuid, suppressHook) => {
+              revalidateVcMeetingManagedSend();
+              return sendMessage(
+                appId,
+                canonicalOutput.targetChatId,
+                body,
+                type,
+                uuid,
+                hookContext,
+                suppressHook ? { suppressHook: true } : undefined,
+              );
+            }
+          : dispatch,
+        beforeQuoteFallback: revalidateVcMeetingManagedSend,
         onQuoteWithdrawn: (id) => {
           console.error(`引用目标 ${id} 已撤回，改为普通发送`);
         },
       },
     );
     primaryQuotedId = result.primaryQuotedId;
+    if (prepared?.kind === 'send' || prepared?.kind === 'succeeded') {
+      finishVcMeetingImReply(resolveDataDir(), prepared.ref, result.messageId);
+    }
+    recordVcMeetingPrimaryOutput(result.messageId, canonicalOutput.targetChatId);
     return result.messageId;
   };
 
   try {
-    // Upload images in parallel
-    const imageKeys: string[] = [];
-    if (images.length > 0) {
-      const results = await Promise.all(images.map(p => uploadImage(appId, p)));
-      imageKeys.push(...results);
-    }
-
     // A file-sandbox relay supplies a host-private copy normalized inside the
     // sandbox namespace. Voice/doc-comment paths returned above and therefore
     // continue using the untouched raw content.
@@ -5640,6 +5997,33 @@ async function cmdSend(rest: string[]): Promise<void> {
     const preparedContentFile = process.env.BOTMUX_CARD_PREPARED_CONTENT_FILE;
     if (preparedContentFile) {
       try { text = readFileSync(preparedContentFile, 'utf-8'); } catch { /* fall back safely below */ }
+    }
+
+    // `preparedContentFile` is presentation data produced inside an untrusted
+    // sandbox and only TOCTOU-materialized by the host watcher. It is not an
+    // authorization proof. Re-check the exact body/attachment shape that will
+    // reach Lark after JSON extraction and prepared-content substitution, and
+    // do so before even an image upload creates a provider-side effect.
+    const managedRenderedPayloadError = managedVcSendPayloadError({
+      managed: !!vcMeetingManagedSendOrigin,
+      asVoice: false,
+      hasBodyText: !!text.trim(),
+      imageCount: images.length,
+      fileCount: files.length,
+      videoCount: videoAttachments.length,
+      containsNativeAtTag: containsLarkAtTag(text),
+    });
+    if (managedRenderedPayloadError) {
+      console.error(`botmux send refused for a managed VC turn: ${managedRenderedPayloadError}`);
+      process.exit(2);
+    }
+
+    // Upload images only after the final rendered payload has passed the
+    // managed side-effect gate above.
+    const imageKeys: string[] = [];
+    if (images.length > 0) {
+      const results = await Promise.all(images.map(p => uploadImage(appId, p)));
+      imageKeys.push(...results);
     }
 
     // Auto-detect @BotName in text and inject as mentions, using the sender
@@ -5666,7 +6050,7 @@ async function cmdSend(rest: string[]): Promise<void> {
       // --no-mention 显式不 @ 任何人：跳过正文 @BotName 的自动注入，否则正文里
       // 出现的 @名字 仍会被注入成 <at>，破坏 --no-mention 语义、还可能误触发对方
       // bot（正是要避免的循环 @）。botEntries/crossRef 仍需加载供 footer 寻址用。
-      if (!noMention) {
+      if (!noMention && !vcMeetingManagedSendOrigin) {
       const alreadyMentioned = new Set(mentions.map(m => m.open_id));
       // Scan a code-span-stripped copy so a bot name quoted inside backticks or a
       // fenced block (e.g. an example `botmux send --mention @Bot …` or an
@@ -5746,7 +6130,9 @@ async function cmdSend(rest: string[]): Promise<void> {
     // （Codex review P2）。--top-level 同样无特定收件人。
     const footerAddressing = (sendTopLevel || noMention)
       ? { sendTo: undefined as string | undefined, cc: [] as string[] }
-      : buildFooterAddressing(s, {
+      : buildFooterAddressing(explicitVcMeetingImOrigin?.replyTargetSenderOpenId
+        ? { ...s, lastCallerOpenId: explicitVcMeetingImOrigin.replyTargetSenderOpenId }
+        : s, {
           isOncall: !!oncallEntry,
           hasExplicitBotMention: explicitKnownBotMention,
           knownBotOpenIds,
@@ -5801,7 +6187,15 @@ async function cmdSend(rest: string[]): Promise<void> {
       // reply in a 普通群 lands as a standalone message that doesn't quote the
       // trigger — unlike file-only/image-only sends whose primary card quotes.
       const videoResult = await sendVideoAttachments(
-        { uploadFile, uploadImage, dispatch, primaryDispatch: dispatchPrimary }, appId, videoAttachments,
+        {
+          uploadFile,
+          uploadImage,
+          dispatch,
+          primaryDispatch: dispatchPrimary,
+          ...(vcMeetingManagedSendOrigin ? { maxMessages: 1 } : {}),
+        },
+        appId,
+        videoAttachments,
       );
       failedVideoAttachments = videoResult.failed;
       if (videoResult.sent.length === 0) {
@@ -5867,7 +6261,9 @@ async function cmdSend(rest: string[]): Promise<void> {
       // v2 cards put buttons inside column_set/column — never the 1.x
       // `tag:'action'` container (Feishu rejects it, error 200861).
       let voiceOn = false;
-      if (!sendTopLevel) {
+      // A managed receiver card has no callback controls: a voice-summary
+      // button would open a second, unledgered model/output action when clicked.
+      if (!sendTopLevel && !vcMeetingManagedSendOrigin) {
         try {
           const { isVoiceConfigured } = await import('./services/voice/index.js');
           voiceOn = isVoiceConfigured(appId);
@@ -5933,7 +6329,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     // the success JSON. Pure-video sends have no text/card primary, so the media
     // message above is the primary and failures before any media is sent still
     // surface as command failure.
-    if (!pureVideoSend) {
+    if (!pureVideoSend && !vcMeetingListenerReplyReplay) {
       ({ failed: failedAttachments } = await sendFileAttachments(
         { uploadFile, dispatch }, appId, files,
       ));
@@ -5971,11 +6367,30 @@ async function cmdSend(rest: string[]): Promise<void> {
       try {
         const daemon = findDaemon(appId);
         if (!daemon) throw new Error(`找不到 daemon (larkAppId=${appId})`);
-        const res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/attention`, {
+        const originCapability = readManagedOriginCapability(
+          resolveDataDir(),
+          sid,
+          process.env.BOTMUX_SEND_RELAY,
+        )?.capability;
+        const request = {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: sid, larkAppId: appId, action: 'raise', kind: attention.kind, reason: text.trim() }),
-        });
+          body: JSON.stringify({
+            sessionId: sid,
+            larkAppId: appId,
+            action: 'raise',
+            kind: attention.kind,
+            reason: text.trim(),
+            originCapability,
+            originTurnId: liveMarkerCtx?.turnId,
+            originDispatchAttempt: liveMarkerCtx?.dispatchAttempt,
+          }),
+        } satisfies RequestInit;
+        let secret: string | undefined;
+        try { secret = loadDaemonIpcSecret(); } catch { /* Seatbelt/read-isolated CLI */ }
+        const res = secret
+          ? await fetchDaemonIpc(daemon.ipcPort, '/api/attention', request, secret)
+          : await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/attention`, request);
         if (!res.ok) throw new Error(`daemon HTTP ${res.status}`);
         attentionRaised = true;
         console.error(`🙋 已举手：本会话已进 dashboard「需要你」列（用户回复后自动撤下）`);
@@ -6523,13 +6938,32 @@ async function postAsk(body: Record<string, unknown>): Promise<import('./core/as
 
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/asks`, {
+    const requestBody = { ...body };
+    if (typeof requestBody.originCapability !== 'string') {
+      const sessionId = typeof requestBody.sessionId === 'string'
+        ? requestBody.sessionId
+        : undefined;
+      const claim = readManagedOriginCapability(
+        resolveDataDir(),
+        sessionId,
+        process.env.BOTMUX_SEND_RELAY,
+      );
+      if (claim) requestBody.originCapability = claim.capability;
+    }
+    const init = {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
       // No client-side timeout — broker enforces `timeoutMs` and will respond
       // with `kind:'timedOut'` so this fetch always settles.
-    });
+    } satisfies RequestInit;
+    let hostSecret: string | undefined;
+    if (!process.env.BOTMUX_SEND_RELAY) {
+      try { hostSecret = loadDaemonIpcSecret(); } catch { /* read-isolated CLI uses live marker auth */ }
+    }
+    res = hostSecret
+      ? await fetchDaemonIpc(daemon.ipcPort, '/api/asks', init, hostSecret)
+      : await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/asks`, init);
   } catch (fetchErr) {
     const msg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
     const err = new Error(
@@ -6624,14 +7058,27 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
   }
 
   const larkAppId = process.env.BOTMUX_LARK_APP_ID!;
+  const askSessionId = process.env.BOTMUX_SESSION_ID!;
+  const liveAskOrigin = resolveSessionContext(resolveDataDir(), askSessionId);
+  const askRelayDir = process.env.BOTMUX_SEND_RELAY;
+  const askOriginCapability = readManagedOriginCapability(
+    resolveDataDir(),
+    askSessionId,
+    askRelayDir,
+  )?.capability;
   const body = {
-    sessionId: process.env.BOTMUX_SESSION_ID!,
+    sessionId: askSessionId,
     chatId: process.env.BOTMUX_CHAT_ID!,
     larkAppId,
     rootMessageId: process.env.BOTMUX_ROOT_MESSAGE_ID || null,
     options,
     prompt,
     timeoutMs,
+    ...(liveAskOrigin?.turnId ? { originTurnId: liveAskOrigin.turnId } : {}),
+    ...(liveAskOrigin?.dispatchAttempt !== undefined
+      ? { originDispatchAttempt: liveAskOrigin.dispatchAttempt }
+      : {}),
+    ...(askOriginCapability ? { originCapability: askOriginCapability } : {}),
   };
 
   let result;
@@ -6877,11 +7324,37 @@ async function cmdSessionReady(): Promise<void> {
   const daemon = findDaemon(larkAppId);
   if (daemon) {
     try {
-      await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/session-ready`, {
+      const relayDir = process.env.BOTMUX_SEND_RELAY;
+      const originCapability = readManagedOriginCapability(
+        resolveDataDir(),
+        sessionId,
+        relayDir,
+      )?.capability;
+      const liveOrigin = resolveSessionContext(resolveDataDir(), sessionId);
+      const envAttempt = Number(process.env.BOTMUX_DISPATCH_ATTEMPT);
+      const originTurnId = liveOrigin?.turnId ?? process.env.BOTMUX_TURN_ID;
+      const originDispatchAttempt = liveOrigin?.dispatchAttempt
+        ?? (Number.isSafeInteger(envAttempt) && envAttempt > 0 ? envAttempt : undefined);
+      const init = {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, source }),
-      });
+        body: JSON.stringify({
+          sessionId,
+          source,
+          originCapability,
+          originTurnId,
+          originDispatchAttempt,
+        }),
+      } satisfies RequestInit;
+      let hostSecret: string | undefined;
+      if (!relayDir) {
+        try { hostSecret = loadDaemonIpcSecret(); } catch { /* Seatbelt/read-isolated CLI */ }
+      }
+      if (!hostSecret) {
+        await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/session-ready`, init);
+      } else {
+        await fetchDaemonIpc(daemon.ipcPort, '/api/session-ready', init, hostSecret);
+      }
     } catch { /* daemon 不可达 → 放弃，worker 走超时兜底 */ }
   }
   process.exit(0);
@@ -6935,7 +7408,7 @@ async function notifyDaemonsReloadLocale(): Promise<{ notified: number; failed: 
   let failed = 0;
   await Promise.all(daemons.map(async (d) => {
     try {
-      const r = await fetch(`http://127.0.0.1:${d.ipcPort}/api/locale/reload`, { method: 'POST' });
+      const r = await fetchDaemonIpc(d.ipcPort, '/api/locale/reload', { method: 'POST' });
       if (r.ok) notified++;
       else failed++;
     } catch { failed++; }
