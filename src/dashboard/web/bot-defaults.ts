@@ -160,7 +160,7 @@ export type SubstituteTargetResolution = {
   openId?: string;
   name?: string;
   avatarUrl?: string;
-  reason?: 'cross_app_open_id' | 'resolve_failed' | 'unresolvable';
+  reason?: 'cross_app_open_id' | 'not_visible' | 'resolve_failed' | 'unresolvable';
 };
 
 export async function resolveSubstituteTarget(

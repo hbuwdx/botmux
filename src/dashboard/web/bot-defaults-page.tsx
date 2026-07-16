@@ -1900,6 +1900,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
   function substituteReasonText(reason?: SubstituteTargetResolution['reason']): string {
     switch (reason) {
       case 'cross_app_open_id': return tr('botDefaults.substituteReasonCrossAppOpenId');
+      case 'not_visible': return tr('botDefaults.substituteReasonNotVisible');
       case 'resolve_failed': return tr('botDefaults.substituteReasonResolveFailed');
       case 'unresolvable': return tr('botDefaults.substituteReasonUnresolvable');
       default: return tr('botDefaults.substituteUnresolved');

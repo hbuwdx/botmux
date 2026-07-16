@@ -13,7 +13,7 @@
  * Run:  pnpm vitest run test/reply-target-fallback.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { beginReplyTargetTurn, fallbackTurnId, pickTurnReplyTarget, resolveSessionReplyTarget } from '../src/core/reply-target.js';
+import { beginReplyTargetTurn, fallbackTurnId, isSubstituteTurn, pickTurnReplyTarget, resolveSessionReplyTarget } from '../src/core/reply-target.js';
 import type { DaemonSession } from '../src/core/types.js';
 
 const NOW = new Date().toISOString();
@@ -149,6 +149,38 @@ describe('per-turn replyTargets — queued/concurrent turns keep their own ancho
     // Unknown turn → the (latest) single slot, preserving legacy behavior for
     // sessions persisted before the map existed.
     expect(pickTurnReplyTarget({ currentReplyTarget: ds.session.currentReplyTarget }, 'turn-x')?.turnId).toBe('turn-b');
+  });
+
+  it('a rootless normal turn is NOT judged substitute after a substitute turn overwrites the slot (codex delta repro)', () => {
+    // Real sequence for 普通群 replyMode=chat: a top-level normal @bot turn has
+    // no replyRootId (begin clears the slot, writes NO map entry); then a
+    // substitute trigger B begins. Turn A must not inherit B's flag via the
+    // slot fallback.
+    const ds = makeDs() as DaemonSession;
+    beginReplyTargetTurn(ds, undefined, 'turn-normal-a', NOW);
+    beginReplyTargetTurn(ds, 'om_trigger_b', 'turn-sub-b', NOW, { quoteOnly: false, substitute: true });
+
+    expect(isSubstituteTurn(ds, 'turn-normal-a')).toBe(false);
+    expect(isSubstituteTurn(ds, 'turn-sub-b')).toBe(true);
+    // And the rootless turn still routes plain, not under B's anchor.
+    expect(resolveSessionReplyTarget(ds, 'turn-normal-a')).toEqual({ mode: 'plain', chatId: 'oc_chat' });
+  });
+
+  it('reverse order: substitute turn stays card-off after a rootless normal turn clears the slot', () => {
+    const ds = makeDs() as DaemonSession;
+    beginReplyTargetTurn(ds, 'om_trigger_b', 'turn-sub-b', NOW, { quoteOnly: false, substitute: true });
+    beginReplyTargetTurn(ds, undefined, 'turn-normal-a', NOW);
+
+    expect(isSubstituteTurn(ds, 'turn-sub-b')).toBe(true); // map survives the slot clear
+    expect(isSubstituteTurn(ds, 'turn-normal-a')).toBe(false);
+  });
+
+  it('isSubstituteTurn without turn context keeps the latest-slot fallback', () => {
+    const ds = makeDs() as DaemonSession;
+    beginReplyTargetTurn(ds, 'om_trigger_b', 'turn-sub-b', NOW, { substitute: true });
+    expect(isSubstituteTurn(ds)).toBe(true);
+    beginReplyTargetTurn(ds, undefined, 'turn-normal-a', NOW);
+    expect(isSubstituteTurn(ds)).toBe(false); // slot cleared by the rootless turn
   });
 
   it('bounds the map and evicted turns degrade to the legacy single-slot behavior', () => {

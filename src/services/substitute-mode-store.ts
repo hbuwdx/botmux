@@ -49,7 +49,7 @@ export interface SubstituteTargetResolution {
   name?: string;
   avatarUrl?: string;
   /** Machine-readable failure reason when ok=false. */
-  reason?: 'cross_app_open_id' | 'resolve_failed' | 'unresolvable';
+  reason?: 'cross_app_open_id' | 'not_visible' | 'resolve_failed' | 'unresolvable';
 }
 
 /** Injected Lark resolvers (real impls live in `im/lark/client`; tests mock). */
@@ -59,12 +59,15 @@ export interface SubstituteResolveDeps {
    *  reports a transient failure during resolution (real impl swallows API
    *  errors internally, so a thrown rejection alone can't signal this). */
   resolveRaw: (larkAppId: string, raw: string[]) => Promise<{ resolved: string[]; map: Map<string, string>; errored?: boolean }>;
-  /** open_id → profile lookup with definitive/transient distinction (matches
-   *  `getUserProfileStrict`): 'not_visible' = this app can never see the user
-   *  (cross-app / out of contact scope); 'error' = transient, retry may succeed. */
+  /** open_id → profile lookup with per-cause definitive/transient distinction
+   *  (matches `getUserProfileStrict`): 'cross_app' = belongs to another app;
+   *  'not_visible' = outside this app's contact visibility scope; 'invalid_id'
+   *  = no such user / malformed; 'error' = transient, retry may succeed. */
   getProfile: (larkAppId: string, openId: string) => Promise<
     | { status: 'ok'; profile: { name: string; avatarUrl?: string } }
+    | { status: 'cross_app' }
     | { status: 'not_visible' }
+    | { status: 'invalid_id' }
     | { status: 'error' }
   >;
 }
@@ -119,10 +122,10 @@ export async function resolveSubstituteTargets(
     if (openId) {
       let name = t.name;
       let avatarUrl: string | undefined;
-      // Three-state lookup: 'not_visible' is definitive (this app can never see
-      // the open_id — cross-app / out of contact scope), 'error' is transient
-      // (network / rate limit) and must not masquerade as cross-app or the user
-      // gets told to discard a perfectly valid target.
+      // Per-cause lookup: definitive failures keep their reason (跨应用 ≠
+      // 通讯录不可见 ≠ 无效 id)，'error' is transient (network / rate limit)
+      // and must not masquerade as any definitive cause or the user gets told
+      // to discard a perfectly valid target.
       const lookup = await deps.getProfile(larkAppId, openId)
         .catch(() => ({ status: 'error' as const }));
       if (lookup.status === 'ok' && lookup.profile.name) {
@@ -132,11 +135,11 @@ export async function resolveSubstituteTargets(
         // A hand-typed open_id must be reachable by this app to be matchable at
         // runtime. Email/union_id resolved open_ids are already app-scoped, so a
         // failed profile lookup is not fatal for them.
-        resolution.push({
-          input: raw,
-          ok: false,
-          reason: lookup.status === 'not_visible' ? 'cross_app_open_id' : 'resolve_failed',
-        });
+        const reason = lookup.status === 'cross_app' ? 'cross_app_open_id'
+          : lookup.status === 'not_visible' ? 'not_visible'
+          : lookup.status === 'invalid_id' ? 'unresolvable'
+          : 'resolve_failed';
+        resolution.push({ input: raw, ok: false, reason });
         continue;
       }
       resolution.push({ input: raw, ok: true, openId, name, avatarUrl });

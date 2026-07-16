@@ -46,9 +46,17 @@ export function isSubstituteTurn(
   ds: Pick<DaemonSession, 'session' | 'currentReplyTarget'>,
   turnId?: string,
 ): boolean {
-  const entry = turnId ? ds.session.replyTargets?.[turnId] : undefined;
-  if (entry) return entry.substitute === true;
-  return (ds.currentReplyTarget ?? ds.session.currentReplyTarget)?.substitute === true;
+  const slot = ds.currentReplyTarget ?? ds.session.currentReplyTarget;
+  if (turnId) {
+    const entry = ds.session.replyTargets?.[turnId];
+    if (entry) return entry.substitute === true;
+    // With explicit turn context, the single slot only speaks for ITS OWN
+    // turn. A rootless normal turn leaves no map entry (begin cleared the
+    // slot) — it must not inherit a later substitute turn's flag after that
+    // turn overwrote the slot (and vice versa).
+    return !!slot && slot.turnId === turnId && slot.substitute === true;
+  }
+  return slot?.substitute === true;
 }
 
 export function resolveSessionReplyTarget(

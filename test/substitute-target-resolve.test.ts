@@ -17,9 +17,11 @@ const deps: SubstituteResolveDeps = {
     return { resolved: [...new Set(map.values())], map };
   },
   async getProfile(_app, openId) {
-    return NAMES[openId]
-      ? { status: 'ok' as const, profile: { name: NAMES[openId] } }
-      : { status: 'not_visible' as const };
+    if (NAMES[openId]) return { status: 'ok' as const, profile: { name: NAMES[openId] } };
+    if (openId === 'ou_other_app') return { status: 'cross_app' as const };
+    if (openId === 'ou_hidden') return { status: 'not_visible' as const };
+    if (openId === 'ou_bogus') return { status: 'invalid_id' as const };
+    return { status: 'not_visible' as const };
   },
 };
 
@@ -77,6 +79,16 @@ describe('resolveSubstituteTargets', () => {
     const { targets, resolution } = await resolveSubstituteTargets('app', [{ openId: 'ou_other_app' }], deps);
     expect(targets).toEqual([]);
     expect(resolution).toEqual([{ input: 'ou_other_app', ok: false, reason: 'cross_app_open_id' }]);
+  });
+
+  it('keeps definitive causes distinct: contact-scope not_visible and invalid_id are not "cross-app"', async () => {
+    const hidden = await resolveSubstituteTargets('app', [{ openId: 'ou_hidden' }], deps);
+    expect(hidden.targets).toEqual([]);
+    expect(hidden.resolution).toEqual([{ input: 'ou_hidden', ok: false, reason: 'not_visible' }]);
+
+    const bogus = await resolveSubstituteTargets('app', [{ openId: 'ou_bogus' }], deps);
+    expect(bogus.targets).toEqual([]);
+    expect(bogus.resolution).toEqual([{ input: 'ou_bogus', ok: false, reason: 'unresolvable' }]);
   });
 
   it('reports a transient profile failure for a hand-typed open_id as resolve_failed, not cross-app', async () => {

@@ -1061,9 +1061,12 @@ export async function deliverEphemeralOrReply(
  * Otherwise stores the card JSON on `ds.pendingCardJson` (overwriting
  * any previously queued value — only the latest state matters).
  */
-export function scheduleCardPatch(ds: DaemonSession, cardJson: string): void {
+export function scheduleCardPatch(ds: DaemonSession, cardJson: string, turnId?: string): void {
   // Bot opted out of the streaming card — never patch one into existence.
-  if (streamingCardDisabled(ds)) return;
+  // Turn-exact when the caller has turn context (screen updates): a substitute
+  // turn arriving mid-PATCH must not suppress a normal turn's card (or vice
+  // versa) just because it overwrote the latest-turn slot.
+  if (streamingCardDisabled(ds, turnId)) return;
   ds.pendingCardJson = cardJson;
   // Capture the card ID now — by the time flushCardPatch runs, ds.streamCardId
   // may have been overwritten by a new turn's card (CARD_POSTING_SENTINEL).
@@ -2358,8 +2361,11 @@ function setupWorkerHandlers(
         // Bot opted out of the streaming card: the terminal is up and the
         // final answer will still arrive via `botmux send`; just don't post the
         // live status card. (workerPort/token above are still set so the web
-        // terminal + dashboard keep working.)
-        if (streamingCardDisabled(ds)) {
+        // terminal + dashboard keep working.) Ready carries the spawning
+        // turn's id — gate on THAT turn, not on whichever turn was accepted
+        // last (a queued normal turn must not resurrect a substitute turn's
+        // initial card, nor the reverse).
+        if (streamingCardDisabled(ds, msg.turnId)) {
           logger.info(`[${t}] Streaming card disabled for this bot — skipping card post`);
           break;
         }
@@ -2766,7 +2772,7 @@ function setupWorkerHandlers(
             writableTerminalLinkFor(ds),
             isLocalCliOpenReady(ds, { cliId: effectiveCliId }),
           );
-          scheduleCardPatch(ds, cardJson);
+          scheduleCardPatch(ds, cardJson, msg.turnId);
         }
         break;
       }

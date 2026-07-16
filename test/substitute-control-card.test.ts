@@ -88,7 +88,7 @@ vi.mock('../src/services/frozen-card-store.js', () => ({
 
 // ─── Imports (after mocks) ──────────────────────────────────────────────────
 
-import { deliverSubstituteControlCard } from '../src/core/worker-pool.js';
+import { deliverSubstituteControlCard, scheduleCardPatch } from '../src/core/worker-pool.js';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -224,6 +224,53 @@ describe('deliverSubstituteControlCard', () => {
 
     const card = JSON.parse(sendUserMessageCalls[0].cardJson);
     expect(card.adoptMode).toBe(true);
+  });
+
+  it('scheduleCardPatch is turn-exact: a normal turn PATCH survives a substitute turn owning the slot', async () => {
+    // codex delta P2: the outer screen-update gate was turn-exact but
+    // scheduleCardPatch re-gated on the latest slot. Normal turn A's PATCH must
+    // go through while substitute turn B holds currentReplyTarget — and B's
+    // PATCH must stay suppressed in the reverse arrangement.
+    const now = new Date().toISOString();
+    const ds = makeDs({
+      pendingSubstituteControlCard: false,
+      cardPatchInFlight: true, // isolate the gate: queue only, no flush
+      currentReplyTarget: { rootMessageId: 'om_trigger_b', turnId: 'om_b', updatedAt: now, substitute: true },
+      session: makeSession({
+        replyTargets: {
+          om_a: { rootMessageId: 'om_a', updatedAt: now },
+          om_b: { rootMessageId: 'om_trigger_b', updatedAt: now, substitute: true },
+        },
+      }),
+    });
+
+    scheduleCardPatch(ds, '{"card":"for-normal-A"}', 'om_a');
+    expect(ds.pendingCardJson).toBe('{"card":"for-normal-A"}');
+
+    ds.pendingCardJson = undefined;
+    scheduleCardPatch(ds, '{"card":"for-substitute-B"}', 'om_b');
+    expect(ds.pendingCardJson).toBeUndefined();
+  });
+
+  it('scheduleCardPatch reverse order: substitute turn suppressed while a normal turn owns the slot', async () => {
+    const now = new Date().toISOString();
+    const ds = makeDs({
+      pendingSubstituteControlCard: false,
+      cardPatchInFlight: true,
+      currentReplyTarget: { rootMessageId: 'om_a', turnId: 'om_a', updatedAt: now },
+      session: makeSession({
+        replyTargets: {
+          om_a: { rootMessageId: 'om_a', updatedAt: now },
+          om_b: { rootMessageId: 'om_trigger_b', updatedAt: now, substitute: true },
+        },
+      }),
+    });
+
+    scheduleCardPatch(ds, '{"card":"for-substitute-B"}', 'om_b');
+    expect(ds.pendingCardJson).toBeUndefined();
+
+    scheduleCardPatch(ds, '{"card":"for-normal-A"}', 'om_a');
+    expect(ds.pendingCardJson).toBe('{"card":"for-normal-A"}');
   });
 
   it('deduplicates owners', async () => {
