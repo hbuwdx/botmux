@@ -3,6 +3,7 @@
  * Run: pnpm vitest run test/p2p-open.test.ts
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
   class FakeClient { constructor(public opts: Record<string, unknown>) {} }
@@ -68,5 +69,17 @@ describe('p2pOpen', () => {
     expect(canTalk('p3', 'oc_group', 'ou_anyone', undefined, undefined, 'group')).toBe(false);
     expect(canOperate('p3', 'oc_dm', 'ou_anyone')).toBe(false);
     expect(canOperate('p3', 'oc_group', 'ou_anyone')).toBe(false);
+  });
+
+  it('Saved Workflow 的独立 quota 闸把 chatType 传进 canTalk 复查', () => {
+    const source = readFileSync(new URL('../src/daemon.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('async function handleV3SavedWorkflowCommandIfAny(');
+    const end = source.indexOf('async function replyInvalidWorkingDirs(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const block = source.slice(start, end);
+    expect(block).toMatch(
+      /consumeMessageQuotaOnce:\s*\(\)\s*=>\s*enforceMessageQuotaForCliInput\([\s\S]*memberUnionId,\s*chatType,\s*\)/,
+    );
   });
 });
