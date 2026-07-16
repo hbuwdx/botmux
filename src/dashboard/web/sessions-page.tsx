@@ -472,7 +472,10 @@ function SessionsFilters(props: {
         name="q"
         placeholder={t('sessions.search')}
         value={props.filters.q}
-        onChange={event => props.setFilters(prev => ({ ...prev, q: event.currentTarget.value }))}
+        onChange={event => {
+          const q = event.currentTarget.value;
+          props.setFilters(prev => ({ ...prev, q }));
+        }}
       />
       <DropdownMenu
         label={statusLabel}
@@ -523,7 +526,10 @@ function SessionsFilters(props: {
           type="checkbox"
           name="active"
           checked={props.filters.active}
-          onChange={event => props.setFilters(prev => ({ ...prev, active: event.currentTarget.checked }))}
+          onChange={event => {
+            const active = event.currentTarget.checked;
+            props.setFilters(prev => ({ ...prev, active }));
+          }}
         />
         <span className="filter-toggle-label">{t('sessions.activeOnly')}</span>
         <span className="filter-toggle-switch" aria-hidden="true" />
