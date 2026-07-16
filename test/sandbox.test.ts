@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtempSync, existsSync, writeFileSync, readFileSync, symlinkSync, rmSync, mkdirSync, realpathSync } from 'node:fs';
-import { buildSandboxArgs, buildRelayHostEnv, reexposeRunBinArgs, validateRelayRequest, materializeOutboxFile, prepareSandbox, resolveSandboxMountPath, sandboxedClaudeDataDir, resolveUserReadonlyRoots, type SandboxPlan } from '../src/adapters/backend/sandbox.js';
+import { buildSandboxArgs, buildRelayHostEnv, reexposeRunBinArgs, validateRelayRequest, materializeOutboxFile, prepareSandbox, resolveSandboxMountPath, sandboxedClaudeDataDir, sandboxCredentialHidePaths, resolveUserReadonlyRoots, type SandboxPlan } from '../src/adapters/backend/sandbox.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 import { computeSandboxDiff, applySandboxDiff, upperDir } from '../src/services/sandbox-land.js';
 
@@ -123,6 +123,22 @@ describe('buildSandboxArgs (overlay model)', () => {
     const maskIdx = a.indexOf('/data/runtime-skills');
     const skillIdx = tripleIdx(a, '--ro-bind', '/data/runtime-skills/s1/claude-plugin', '/data/runtime-skills/s1/claude-plugin');
     expect(skillIdx).toBeGreaterThan(maskIdx);
+  });
+
+  it('re-opens the own private CLI home after its parent mask, then re-masks send credentials', () => {
+    const ownHome = '/custom/botmux/bots/app_self';
+    const sendCred = `${ownHome}/send-cred.json`;
+    const empty = '/data/sandboxes/s1/empties/mask-final';
+    const a = buildSandboxArgs(plan({
+      hideDirs: ['/custom/botmux'],
+      trustedWritableRoots: [ownHome],
+      finalHideFiles: [{ path: sendCred, empty }],
+    }));
+    const parentMaskIdx = a.indexOf('/custom/botmux');
+    const ownHomeIdx = tripleIdx(a, '--bind', ownHome, ownHome);
+    const sendCredIdx = tripleIdx(a, '--ro-bind', empty, sendCred);
+    expect(ownHomeIdx).toBeGreaterThan(parentMaskIdx);
+    expect(sendCredIdx).toBeGreaterThan(ownHomeIdx);
   });
 
   it('no clone/scrub artefacts: never binds a per-session clone "work" dir', () => {
@@ -319,6 +335,25 @@ describe('validateRelayRequest', () => {
     expect(r.value.flags).toEqual(['--no-mention']);
   });
 
+  it('validates and preserves a frozen relay origin', () => {
+    const r = validateRelayRequest({
+      contentFile: 'c.content',
+      flags: ['--no-mention'],
+      originTurnId: 'delivery-key',
+      originDispatchAttempt: 3,
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      value: { originTurnId: 'delivery-key', originDispatchAttempt: 3 },
+    });
+    expect(validateRelayRequest({
+      contentFile: 'c.content', originDispatchAttempt: 1,
+    })).toMatchObject({ ok: false });
+    expect(validateRelayRequest({
+      contentFile: 'c.content', originTurnId: 'delivery-key', originDispatchAttempt: 0,
+    })).toMatchObject({ ok: false });
+  });
+
   it('rejects the raw-hostArgs exploit (path-bearing flag not allowlisted)', () => {
     expect(validateRelayRequest({ contentFile: 'c.content', flags: ['--content-file', '/root/.botmux/bots.json'] }).ok).toBe(false);
     expect(validateRelayRequest({ contentFile: 'c.content', flags: ['--files', '/root/.ssh/id_rsa'] }).ok).toBe(false);
@@ -327,6 +362,13 @@ describe('validateRelayRequest', () => {
 
   it('rejects a sandbox-supplied --session-id (cannot target another session)', () => {
     expect(validateRelayRequest({ contentFile: 'c.content', flags: ['--session-id', 'other'] }).ok).toBe(false);
+  });
+
+  it('rejects sandbox-supplied --attention (receiver cannot emit an unledgered daemon hook)', () => {
+    expect(validateRelayRequest({
+      contentFile: 'c.content',
+      flags: ['--attention'],
+    })).toMatchObject({ ok: false, error: 'flag not allowed: --attention' });
   });
 
   it('rejects a value-taking flag whose value is itself a flag (--mention --session-id desync)', () => {
@@ -343,6 +385,34 @@ describe('validateRelayRequest', () => {
     expect(validateRelayRequest({ contentFile: 'c.content', videoCovers: ['../cover.png'] }).ok).toBe(false);
     expect(validateRelayRequest({ contentFile: 'a/b' }).ok).toBe(false);
     expect(validateRelayRequest({ /* missing contentFile */ flags: [] }).ok).toBe(false);
+  });
+});
+
+describe('sandbox credential boundary', () => {
+  it('masks every direct botmux/Lark credential source so relay is the only send path', () => {
+    expect(sandboxCredentialHidePaths('/home/agent')).toEqual([
+      '/home/agent/.lark-cli',
+      '/home/agent/.lark-cli-bots',
+      '/home/agent/.botmux',
+    ].sort());
+  });
+
+  it('covers timestamped/future bots.json sidecars by masking their parent state root', () => {
+    const home = tmp();
+    mkdirSync(join(home, '.botmux'), { recursive: true });
+    writeFileSync(join(home, '.botmux', 'bots.json.bak-20260711'), '{}');
+    writeFileSync(join(home, '.botmux', 'bots.json.previous.json'), '{}');
+    const hidden = sandboxCredentialHidePaths(home);
+    expect(hidden).toContain(join(home, '.botmux'));
+  });
+
+  it('masks both the default and custom BOTMUX_HOME roots', () => {
+    expect(sandboxCredentialHidePaths('/home/agent', '/srv/botmux-runtime')).toEqual([
+      '/home/agent/.botmux',
+      '/home/agent/.lark-cli',
+      '/home/agent/.lark-cli-bots',
+      '/srv/botmux-runtime',
+    ].sort());
   });
 });
 

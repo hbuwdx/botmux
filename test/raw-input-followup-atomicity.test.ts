@@ -32,10 +32,19 @@ function caseRegion(src: string, marker: string, span = 3000): string {
 describe('worker raw_input handler', () => {
   const region = caseRegion(workerSrc, "case 'raw_input':");
 
-  it('keeps busy delivery but defers commands while native rename owns the TUI', () => {
-    expect(region).toContain('if (sessionRenameInFlight)');
-    expect(region).toContain('pendingRawInputs.push(msg)');
-    expect(region).toContain('await deliverRawInput(msg)');
+  it('queues through an owned restart until the replacement prompt, while preserving normal busy delivery', () => {
+    const gateIdx = region.indexOf(
+      'if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight)',
+    );
+    const queueIdx = region.indexOf('pendingRawInputs.push(msg)');
+    const deliverIdx = region.indexOf('await deliverRawInput(msg)');
+
+    expect(gateIdx).toBeGreaterThanOrEqual(0);
+    expect(queueIdx).toBeGreaterThan(gateIdx);
+    expect(deliverIdx).toBeGreaterThan(queueIdx);
+    // isPromptReady is false while an active CLI is busy, so gating on it would
+    // break /btw-style passthrough. The restart-only latch preserves that path.
+    expect(region).not.toContain('isPromptReady');
     expect(region).not.toContain('sendRawCommandLine(');
   });
 });
@@ -52,7 +61,8 @@ describe('worker raw_input delivery', () => {
   });
 
   it('routes the follow-up through sendToPty (normal busy-queue semantics)', () => {
-    expect(region).toContain('sendToPty(msg.followUpContent, undefined, msg.followUpCodexAppInput)');
+    expect(region).toContain('sendToPty(msg.followUpContent, undefined, {');
+    expect(region).toContain('codexAppInput: msg.followUpCodexAppInput');
   });
 
   it('holds ordinary prompt flushes only for the text-to-Enter critical window', () => {
