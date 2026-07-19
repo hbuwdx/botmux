@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -520,10 +520,15 @@ describe('local-cli-opener', () => {
       const legacyStale = mkdtempSync(join(root, 'botmux-open-'));
       const recent = mkdtempSync(join(root, 'botmux-open-command-'));
       const unrelated = mkdtempSync(join(root, 'botmux-open-local-cli-'));
+      const similarlyNamed = join(root, 'botmux-open-command-user-data');
+      mkdirSync(similarlyNamed);
+      const sentinel = join(similarlyNamed, 'keep.txt');
+      writeFileSync(sentinel, 'keep');
       const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
       utimesSync(stale, old, old);
       utimesSync(legacyStale, old, old);
       utimesSync(unrelated, old, old);
+      utimesSync(similarlyNamed, old, old);
 
       const result = await openLocalCliInIterm(ds(), {
         platform: 'darwin',
@@ -538,6 +543,7 @@ describe('local-cli-opener', () => {
       expect(existsSync(legacyStale)).toBe(false);
       expect(existsSync(recent)).toBe(true);
       expect(existsSync(unrelated)).toBe(true);
+      expect(existsSync(sentinel)).toBe(true);
     });
   });
 
