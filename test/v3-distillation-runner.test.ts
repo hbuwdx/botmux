@@ -44,11 +44,12 @@ function runV3DistillationModel(
   input: Parameters<typeof runV3DistillationModelImpl>[0],
   deps: NonNullable<Parameters<typeof runV3DistillationModelImpl>[1]> = {},
 ) {
-  const adapterBin = deps.adapterBin === process.execPath
+  const useHostPortableSeams = process.platform !== 'linux';
+  const adapterBin = useHostPortableSeams && deps.adapterBin === process.execPath
     ? hostPortableStockClaudeFixture(deps.scratchParent)
     : deps.adapterBin;
   return runV3DistillationModelImpl(input, {
-    etcSnapshot: ['hosts'],
+    ...(useHostPortableSeams ? { etcSnapshot: ['hosts'] } : {}),
     ...deps,
     adapterBin,
   });
