@@ -73,7 +73,7 @@ botmux skills install github:acme/agent-skills/skills/deploy-runbook
 botmux skills install github:acme/agent-skills --path skills/deploy-runbook --ref main
 ```
 
-私有仓库可复用部署机已有权限：GitHub HTTPS 来源依次读取进程或 `~/.botmux/.env` 中的 `GITHUB_TOKEN` / `GH_TOKEN`、当前 `gh auth` 账号，再回落到系统 Git credential helper；若 HTTPS 因鉴权失败，GitHub 网页 URL 会自动改用 SSH URL 重试。显式 `git@github.com:owner/repo.git` 来源也直接使用 SSH agent/key。botmux 只把 HTTPS token 作为限定到 `github.com` 的临时 Git 请求头，不写入 URL、命令行或 registry；带 username/password/token 的 HTTPS Git URL 会被拒绝，避免凭证进入 Dashboard 和错误日志。
+私有仓库可复用部署机已有权限：GitHub HTTPS 来源依次读取进程或 `~/.botmux/.env` 中的 `GITHUB_TOKEN` / `GH_TOKEN`、当前 `gh auth` 账号；若注入的 token 鉴权失败，会先去掉临时请求头，让公开仓库匿名访问或系统 Git credential helper 接管，仍为鉴权失败时才自动改用 SSH URL 重试。显式 `git@github.com:owner/repo.git` 来源也直接使用 SSH agent/key。botmux 只把 HTTPS token 作为限定到 `github.com` 的临时 Git 请求头，不写入 URL、命令行或 registry；带 username/password/token 的 HTTPS Git URL 会被拒绝，避免凭证进入 Dashboard 和错误日志。
 Git/GitHub 的 `--path` 必须是仓库内相对路径；绝对路径、`..` segment 或解析到 checkout 外部的 symlink 会被拒绝。
 Git 安装/更新会给底层 Git 命令设置超时，默认 60 秒；需要更长时间时可设置 `BOTMUX_SKILL_GIT_TIMEOUT_MS`。
 Dashboard/CLI 的 Git `discover` 使用一次性 checkout，扫描结束即删除；只有实际安装/更新的来源保留在 `~/.botmux/skills/sources`，避免预览 URL 与最终安装 URL 不同时留下两份长期缓存。

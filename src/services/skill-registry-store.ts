@@ -440,36 +440,36 @@ function isGitAuthenticationFailure(err: unknown): boolean {
   return /authentication failed|could not read username|terminal prompts disabled|repository not found|unauthor|\b401\b|\b403\b/i.test(message);
 }
 
-function gitEnv(url?: string): NodeJS.ProcessEnv {
+function gitEnv(extraEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_ALLOW_PROTOCOL: 'https:http:ssh:git:file',
     GIT_TERMINAL_PROMPT: '0',
-    ...(isGithubHttpsUrl(url) ? githubGitAuthEnv() : {}),
+    ...extraEnv,
   };
 }
 
-function git(args: string[], cwd?: string, authUrl?: string): string {
+function git(args: string[], cwd?: string, extraEnv?: NodeJS.ProcessEnv): string {
   try {
     return execFileSync('git', args, {
       cwd,
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: gitTimeoutMs(),
-      env: gitEnv(authUrl),
+      env: gitEnv(extraEnv),
     }).trim();
   } catch (err: any) {
     throw formatGitFailure(args, err);
   }
 }
 
-async function gitAsync(args: string[], cwd?: string, authUrl?: string): Promise<string> {
+async function gitAsync(args: string[], cwd?: string, extraEnv?: NodeJS.ProcessEnv): Promise<string> {
   try {
     const result = await execFileAsync('git', args, {
       cwd,
       encoding: 'utf-8',
       timeout: gitTimeoutMs(),
-      env: gitEnv(authUrl),
+      env: gitEnv(extraEnv),
     });
     return String(result.stdout ?? '').trim();
   } catch (err: any) {
@@ -477,34 +477,146 @@ async function gitAsync(args: string[], cwd?: string, authUrl?: string): Promise
   }
 }
 
-function cloneGitSource(url: string, dir: string): void {
+function gitErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function gitFallbackFailure(
+  httpsError: unknown,
+  anonymousError: unknown | undefined,
+  sshError?: unknown,
+): Error {
+  return new Error([
+    gitErrorMessage(httpsError),
+    ...(anonymousError && anonymousError !== httpsError
+      ? [`anonymous HTTPS retry failed: ${gitErrorMessage(anonymousError)}`]
+      : []),
+    ...(sshError ? [`ssh fallback failed: ${gitErrorMessage(sshError)}`] : []),
+  ].join('; '));
+}
+
+/**
+ * For GitHub HTTPS, try the botmux-resolved token first. If that credential is
+ * stale, retry the same operation without botmux's header so public repos and
+ * system credential helpers still work, then use SSH only after the anonymous
+ * HTTPS attempt also proves to be an authentication failure.
+ */
+function withGithubHttpsFallback<T>(
+  url: string,
+  attemptHttps: (authEnv?: NodeJS.ProcessEnv) => T,
+  attemptSsh: (sshUrl: string) => T,
+): T {
+  const sshUrl = githubSshUrl(url);
+  const authEnv = sshUrl ? githubGitAuthEnv() : {};
+  const hasBotmuxAuth = Object.keys(authEnv).length > 0;
   try {
-    git(['clone', '--', url, dir], skillSourcesDir(), url);
+    return attemptHttps(hasBotmuxAuth ? authEnv : undefined);
   } catch (httpsError) {
-    const sshUrl = githubSshUrl(url);
     if (!sshUrl || !isGitAuthenticationFailure(httpsError)) throw httpsError;
-    rmSync(dir, { recursive: true, force: true });
+    let anonymousError: unknown = httpsError;
+    if (hasBotmuxAuth) {
+      try {
+        return attemptHttps();
+      } catch (error) {
+        anonymousError = error;
+        if (!isGitAuthenticationFailure(error)) {
+          throw gitFallbackFailure(httpsError, anonymousError);
+        }
+      }
+    }
     try {
-      git(['clone', '--', sshUrl, dir], skillSourcesDir());
+      return attemptSsh(sshUrl);
     } catch (sshError) {
-      throw new Error(`${httpsError instanceof Error ? httpsError.message : String(httpsError)}; ssh fallback failed: ${sshError instanceof Error ? sshError.message : String(sshError)}`);
+      throw gitFallbackFailure(httpsError, anonymousError, sshError);
     }
   }
 }
 
-async function cloneGitSourceAsync(url: string, dir: string): Promise<void> {
+async function withGithubHttpsFallbackAsync<T>(
+  url: string,
+  attemptHttps: (authEnv?: NodeJS.ProcessEnv) => Promise<T>,
+  attemptSsh: (sshUrl: string) => Promise<T>,
+): Promise<T> {
+  const sshUrl = githubSshUrl(url);
+  const authEnv = sshUrl ? githubGitAuthEnv() : {};
+  const hasBotmuxAuth = Object.keys(authEnv).length > 0;
   try {
-    await gitAsync(['clone', '--', url, dir], skillSourcesDir(), url);
+    return await attemptHttps(hasBotmuxAuth ? authEnv : undefined);
   } catch (httpsError) {
-    const sshUrl = githubSshUrl(url);
     if (!sshUrl || !isGitAuthenticationFailure(httpsError)) throw httpsError;
-    rmSync(dir, { recursive: true, force: true });
+    let anonymousError: unknown = httpsError;
+    if (hasBotmuxAuth) {
+      try {
+        return await attemptHttps();
+      } catch (error) {
+        anonymousError = error;
+        if (!isGitAuthenticationFailure(error)) {
+          throw gitFallbackFailure(httpsError, anonymousError);
+        }
+      }
+    }
     try {
-      await gitAsync(['clone', '--', sshUrl, dir], skillSourcesDir());
+      return await attemptSsh(sshUrl);
     } catch (sshError) {
-      throw new Error(`${httpsError instanceof Error ? httpsError.message : String(httpsError)}; ssh fallback failed: ${sshError instanceof Error ? sshError.message : String(sshError)}`);
+      throw gitFallbackFailure(httpsError, anonymousError, sshError);
     }
   }
+}
+
+function cloneGitSource(url: string, dir: string): void {
+  withGithubHttpsFallback(url, authEnv => {
+    rmSync(dir, { recursive: true, force: true });
+    git(['clone', '--', url, dir], skillSourcesDir(), authEnv);
+  }, sshUrl => {
+    rmSync(dir, { recursive: true, force: true });
+    git(['clone', '--', sshUrl, dir], skillSourcesDir());
+    // The cache identity and registry keep the canonical HTTPS source. Future
+    // updates re-evaluate HTTPS credentials before falling back to SSH again.
+    git(['remote', 'set-url', 'origin', url], dir);
+  });
+}
+
+async function cloneGitSourceAsync(url: string, dir: string): Promise<void> {
+  await withGithubHttpsFallbackAsync(url, async authEnv => {
+    rmSync(dir, { recursive: true, force: true });
+    await gitAsync(['clone', '--', url, dir], skillSourcesDir(), authEnv);
+  }, async sshUrl => {
+    rmSync(dir, { recursive: true, force: true });
+    await gitAsync(['clone', '--', sshUrl, dir], skillSourcesDir());
+    await gitAsync(['remote', 'set-url', 'origin', url], dir);
+  });
+}
+
+function fetchGitSource(url: string, dir: string, args: string[]): string {
+  if (isGithubHttpsUrl(url)) git(['remote', 'set-url', 'origin', url], dir);
+  return withGithubHttpsFallback(
+    url,
+    authEnv => git(args, dir, authEnv),
+    sshUrl => {
+      git(['remote', 'set-url', 'origin', sshUrl], dir);
+      try {
+        return git(args, dir);
+      } finally {
+        git(['remote', 'set-url', 'origin', url], dir);
+      }
+    },
+  );
+}
+
+async function fetchGitSourceAsync(url: string, dir: string, args: string[]): Promise<string> {
+  if (isGithubHttpsUrl(url)) await gitAsync(['remote', 'set-url', 'origin', url], dir);
+  return withGithubHttpsFallbackAsync(
+    url,
+    authEnv => gitAsync(args, dir, authEnv),
+    async sshUrl => {
+      await gitAsync(['remote', 'set-url', 'origin', sshUrl], dir);
+      try {
+        return await gitAsync(args, dir);
+      } finally {
+        await gitAsync(['remote', 'set-url', 'origin', url], dir);
+      }
+    },
+  );
 }
 
 function ensureGitSource(url: string): string {
@@ -513,7 +625,7 @@ function ensureGitSource(url: string): string {
   const dir = join(skillSourcesDir(), sourceId(url));
   mkdirSync(skillSourcesDir(), { recursive: true });
   if (existsSync(join(dir, '.git'))) {
-    git(['fetch', '--tags', '--prune'], dir, url);
+    fetchGitSource(url, dir, ['fetch', '--tags', '--prune']);
   } else {
     // Never inherit the daemon's cwd for clone: a daemon can outlive the
     // checkout it was launched from, leaving process.cwd() deleted.
@@ -527,7 +639,7 @@ function checkoutGitSource(url: string, refValue: string | undefined): { sourceD
   const sourceDir = ensureGitSource(url);
   const ref = refValue ?? 'HEAD';
   if (ref === 'HEAD') {
-    git(['fetch', 'origin', 'HEAD'], sourceDir, url);
+    fetchGitSource(url, sourceDir, ['fetch', 'origin', 'HEAD']);
     git(['checkout', 'FETCH_HEAD'], sourceDir);
   } else {
     git(['checkout', ref], sourceDir);
@@ -541,7 +653,7 @@ async function ensureGitSourceAsync(url: string): Promise<string> {
   const dir = join(skillSourcesDir(), sourceId(url));
   mkdirSync(skillSourcesDir(), { recursive: true });
   if (existsSync(join(dir, '.git'))) {
-    await gitAsync(['fetch', '--tags', '--prune'], dir, url);
+    await fetchGitSourceAsync(url, dir, ['fetch', '--tags', '--prune']);
   } else {
     // See the synchronous path above: dashboard jobs must also be independent
     // from a stale/deleted daemon launch directory.
@@ -555,7 +667,7 @@ async function checkoutGitSourceAsync(url: string, refValue: string | undefined)
   const sourceDir = await ensureGitSourceAsync(url);
   const ref = refValue ?? 'HEAD';
   if (ref === 'HEAD') {
-    await gitAsync(['fetch', 'origin', 'HEAD'], sourceDir, url);
+    await fetchGitSourceAsync(url, sourceDir, ['fetch', 'origin', 'HEAD']);
     await gitAsync(['checkout', 'FETCH_HEAD'], sourceDir);
   } else {
     await gitAsync(['checkout', ref], sourceDir);
@@ -589,7 +701,7 @@ function checkoutTemporaryGitSource(url: string, refValue: string | undefined): 
     cloneGitSource(url, sourceDir);
     const ref = refValue ?? 'HEAD';
     if (ref === 'HEAD') {
-      git(['fetch', 'origin', 'HEAD'], sourceDir, url);
+      fetchGitSource(url, sourceDir, ['fetch', 'origin', 'HEAD']);
       git(['checkout', 'FETCH_HEAD'], sourceDir);
     } else {
       git(['checkout', ref], sourceDir);
@@ -616,7 +728,7 @@ async function checkoutTemporaryGitSourceAsync(url: string, refValue: string | u
     await cloneGitSourceAsync(url, sourceDir);
     const ref = refValue ?? 'HEAD';
     if (ref === 'HEAD') {
-      await gitAsync(['fetch', 'origin', 'HEAD'], sourceDir, url);
+      await fetchGitSourceAsync(url, sourceDir, ['fetch', 'origin', 'HEAD']);
       await gitAsync(['checkout', 'FETCH_HEAD'], sourceDir);
     } else {
       await gitAsync(['checkout', ref], sourceDir);
