@@ -1179,7 +1179,8 @@ describe('repo select card — worktree open', () => {
   });
 
   it('worktree_toggle_mode flips the persisted picker mode and re-sends a fresh repo card', async () => {
-    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null, repoCardMessageId: 'om_old_card' });
+    // Callback open_message_id must match the live posted card.
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null, repoCardMessageId: 'om_card' });
     const { deps, sessionReply } = makeDeps(ds);
     const event = {
       operator: { open_id: OWNER },
@@ -1193,7 +1194,7 @@ describe('repo select card — worktree open', () => {
     // persisted the flipped mode (config undefined → true)
     expect(vi.mocked(applyConfigField)).toHaveBeenCalledWith('app_test', expect.objectContaining({ configKey: 'worktreeMultiPicker' }), true);
     // withdrew the old card and posted a fresh interactive repo card
-    expect(vi.mocked(deleteMessage)).toHaveBeenCalledWith('app_test', 'om_old_card');
+    expect(vi.mocked(deleteMessage)).toHaveBeenCalledWith('app_test', 'om_card');
     const interactiveCall = sessionReply.mock.calls.find(c => c[2] === 'interactive');
     expect(interactiveCall).toBeDefined();
     expect(createRepoWorktree).not.toHaveBeenCalled();
@@ -1201,10 +1202,49 @@ describe('repo select card — worktree open', () => {
     expect(ds.worktreeCreating).not.toBe(true);
   });
 
+  it('worktree_toggle_mode rejects a stale/wrong card id before flipping config', async () => {
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null, repoCardMessageId: 'om_live_card' });
+    const { deps } = makeDeps(ds);
+    const event = {
+      operator: { open_id: OWNER },
+      action: { value: { action: 'worktree_toggle_mode', root_id: ROOT_ID } },
+      context: { open_message_id: 'om_stale_card' },
+    };
+
+    const res = await handleCardAction(event, deps, APP_ID);
+
+    expect(res?.toast?.content).toMatch(/仓库已选定|ignore the old card/i);
+    expect(vi.mocked(applyConfigField)).not.toHaveBeenCalled();
+    expect(vi.mocked(deleteMessage)).not.toHaveBeenCalled();
+    expect(ds.repoCardMessageId).toBe('om_live_card');
+  });
+
+  it('worktree_toggle_mode rejects restart-like state with no live repoCardMessageId', async () => {
+    const ds = makeDs({
+      pendingRepo: true,
+      pendingPrompt: 'hi',
+      worker: null,
+      repoCardMessageId: undefined,
+      consumedRepoCardMessageIds: undefined,
+    });
+    const { deps } = makeDeps(ds);
+    const event = {
+      operator: { open_id: OWNER },
+      action: { value: { action: 'worktree_toggle_mode', root_id: ROOT_ID } },
+      context: { open_message_id: 'om_card' },
+    };
+
+    const res = await handleCardAction(event, deps, APP_ID);
+
+    expect(res?.toast?.content).toMatch(/仓库已选定|ignore the old card/i);
+    expect(vi.mocked(applyConfigField)).not.toHaveBeenCalled();
+    expect(vi.mocked(deleteMessage)).not.toHaveBeenCalled();
+  });
+
   it('worktree_toggle_mode requires canOperate — a non-operator (even the pending-session owner) cannot flip bot config', async () => {
     // It writes bot-level worktreeMultiPicker (bots.json), so it must NOT ride
     // the pendingRepoOwnerException that lets talk-only users start their own session.
-    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null, repoCardMessageId: 'om_old_card' });
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null, repoCardMessageId: 'om_card' });
     const { deps } = makeDeps(ds);
     vi.mocked(canOperate).mockReturnValueOnce(false); // non-operator
     const event = {

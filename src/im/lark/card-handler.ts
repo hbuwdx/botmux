@@ -2222,6 +2222,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       // re-send a fresh repo card in the new mode — a form can't ride an
       // in-place patch, so the old card is withdrawn and a new one posted.
       const locDs = localeForBot(ds.larkAppId);
+      // Same active-card gate as skip/manual/worktree: a stale card must not
+      // flip bot config or replace the live repo card after claim/restart.
+      if (cardMessageId && !isActiveRepoCard(ds, cardMessageId)) {
+        return { toast: { type: 'info', content: t('cmd.repo.card_already_consumed', undefined, locDs) } };
+      }
       const spec = findConfigField('worktreeMultiPicker');
       if (!spec) return;
       const next = getBot(ds.larkAppId).config.worktreeMultiPicker !== true;
