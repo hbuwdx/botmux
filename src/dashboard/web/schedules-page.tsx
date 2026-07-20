@@ -582,7 +582,13 @@ function ScheduleFormModal(props: {
               checked={silent}
               onChange={e => {
                 setSilent(e.target.checked);
-                if (e.target.checked && deliver === 'new-topic') setDeliver('origin');
+                // silent + new-topic are mutually exclusive: auto-switch to origin
+                // and mark deliver as touched so the PATCH includes it (otherwise
+                // the backend still sees new-topic and rejects silent:true).
+                if (e.target.checked && deliver === 'new-topic') {
+                  setDeliver('origin');
+                  setDeliverTouched(true);
+                }
               }}
             />
             <span>
