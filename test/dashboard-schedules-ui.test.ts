@@ -67,4 +67,21 @@ describe('dashboard schedules React page helpers', () => {
     // viewer in another browser zone isn't misled.
     expect(out).toMatch(/GMT|UTC|[A-Z]{2,5}/);
   });
+
+  it('keeps schedule-state CSS rule intact and left-aligns the error chip', () => {
+    const css = readFileSync(new URL('../src/dashboard/web/style.css', import.meta.url), 'utf8');
+    // Regression: inserting the error-chip rule must not clobber the
+    // `.schedule-row-head .schedule-state {` selector (previously its body
+    // became orphaned declarations, dropping enabled styling + min-width).
+    expect(css).toContain('.schedule-row-head .schedule-state {');
+    // The error chip must left-align so long errors keep the "⚠ Error" prefix
+    // instead of being center-clipped.
+    expect(css).toMatch(
+      /\.schedule-chip-strip span\.schedule-error-chip \{[\s\S]*?justify-content:\s*flex-start/,
+    );
+    // No orphaned declarations between the error-chip rule and the next rule.
+    expect(css).toMatch(
+      /\.schedule-chip-strip span\.schedule-error-chip \{[\s\S]*?\}\s*\.schedule-row-head \.schedule-state \{/,
+    );
+  });
 });

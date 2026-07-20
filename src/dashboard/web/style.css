@@ -11999,7 +11999,11 @@ tbody tr[data-chat]:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: help;
+  justify-content: flex-start;
+  text-align: left;
 }
+
+.schedule-row-head .schedule-state {
   align-self: center;
   min-width: 42px;
   padding: 0 10px;
