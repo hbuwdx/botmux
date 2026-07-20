@@ -2226,6 +2226,71 @@ describe('handleCommand', () => {
       expect(scanMultipleProjects).not.toHaveBeenCalled();
     });
 
+    it('bare /repo does not pin the default workingDir onto the session record', async () => {
+      // Text twin of skip_repo: launch in default cwd without persisting it, so
+      // sibling bots still get their own repo card instead of inheriting HOME.
+      const ds = makeDaemonSession({
+        pendingRepo: true,
+        pendingPrompt: '',
+        repoCardMessageId: 'om_card',
+      });
+      ds.workingDir = undefined;
+      ds.session.workingDir = undefined;
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledTimes(1);
+      expect(ds.workingDir).toBeUndefined();
+      expect(ds.session.workingDir).toBeUndefined();
+    });
+
+    it('holds the pending claim through confirmation so a second /repo cannot mid-session-switch', async () => {
+      const ds = makeDaemonSession({
+        pendingRepo: true,
+        pendingPrompt: 'hello world',
+        pendingTurnId: 'om_first_turn',
+        repoCardMessageId: 'om_card',
+      });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, [
+        { name: 'project-a', path: '/home/testuser/project-a', branch: 'main' },
+        { name: 'project-b', path: '/home/testuser/project-b', branch: 'dev' },
+      ]);
+      let releaseReply: (() => void) | undefined;
+      vi.mocked(deps.sessionReply).mockImplementation(async (_root, text) => {
+        if (typeof text === 'string' && text.includes('已选择') && !releaseReply) {
+          return new Promise<string>(res => { releaseReply = () => res('reply-msg-id'); });
+        }
+        return 'reply-msg-id';
+      });
+
+      const first = handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1'), deps, LARK_APP_ID);
+      await vi.waitFor(() => expect(forkWorker).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(releaseReply).toBeTruthy());
+      expect(ds.pendingRepo).toBe(false);
+      expect(ds.pendingRepoCommitInFlight).toBe(true);
+      const sessionIdAfterFirstFork = ds.session.sessionId;
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 2'), deps, LARK_APP_ID);
+
+      expect(forkWorker).toHaveBeenCalledTimes(1);
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(sessionStore.createSession).not.toHaveBeenCalled();
+      expect(ds.session.sessionId).toBe(sessionIdAfterFirstFork);
+      expect(ds.workingDir).toBe('/home/testuser/project-a');
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+
+      releaseReply!();
+      await first;
+
+      expect(forkWorker).toHaveBeenCalledTimes(1);
+      expect(ds.pendingRepoCommitInFlight).toBe(false);
+      expect(deleteMessage).toHaveBeenCalledWith(LARK_APP_ID, 'om_card');
+      expect(ds.repoCardMessageId).toBeUndefined();
+    });
+
     it('should still submit a buffered first message when bare /repo skips the card', async () => {
       // Normal flow: real first message → card shown → user types bare /repo to
       // skip. The buffered message must be delivered, not dropped.

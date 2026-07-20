@@ -360,7 +360,17 @@ export async function commitRepoSelection(
   // The worktree flow already posted a precise "worktree 已创建：path 分支 …"
   // line before funnelling in here — suppress the redundant "已选择/已切换"
   // confirmation so the user sees a single message, not two.
-  opts?: { suppressConfirmReply?: boolean; riffRepoDirs?: string[] },
+  // pinWorkingDir=false: "直接开始"/skip keeps the default cwd for this launch
+  // without persisting it (esp. $HOME) onto session.workingDir — sibling bots
+  // must still get their own repo card instead of inheriting HOME.
+  // confirmReplyText: optional confirmation to send under the same claim
+  // (used by skip_repo so the post-fork reply window cannot race a second click).
+  opts?: {
+    suppressConfirmReply?: boolean;
+    confirmReplyText?: string;
+    pinWorkingDir?: boolean;
+    riffRepoDirs?: string[];
+  },
 ): Promise<void> {
   const { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply } = ctx;
   const locTarget = localeForBot(ds.larkAppId);
@@ -370,6 +380,7 @@ export async function commitRepoSelection(
   const repoSessionKey = larkAppId ? sessionKey(rootId, larkAppId) : rootId;
   const sessionStillActive = () => activeSessions.get(repoSessionKey) === ds;
   const commitGenSessionId = ds.session.sessionId;
+  const pinWorkingDir = opts?.pinWorkingDir !== false;
 
   if (ds.pendingRepo) {
     // Card select/skip and auto-worktree converge here; the text /repo path
@@ -384,8 +395,12 @@ export async function commitRepoSelection(
     try {
       // Claim before mutating the selected directory so two different card
       // choices cannot overwrite each other while one prompt is being built.
-      ds.workingDir = dirPath;
-      ds.session.workingDir = dirPath;
+      // Skip/bare-start may intentionally leave workingDir unpinned so the
+      // launch uses the bot default without persisting $HOME for siblings.
+      if (pinWorkingDir) {
+        ds.workingDir = dirPath;
+        ds.session.workingDir = dirPath;
+      }
       ds.session.riffRepoDirs = opts?.riffRepoDirs;
       sessionStore.updateSession(ds.session);
       const selfBot = getBot(ds.larkAppId);
@@ -492,17 +507,28 @@ export async function commitRepoSelection(
       ds.pendingFollowUpTurnId = undefined;
       ds.pendingTurnId = undefined;
       committed = true;
+
+      // Hold the claim through confirmation + card consumption. Releasing right
+      // after forkWorker leaves a window where a second card click sees
+      // pendingRepo=false and pendingRepoCommitInFlight=false, and is treated as
+      // a mid-session switch that kills the just-started worker.
+      if (!opts?.suppressConfirmReply) {
+        // A card click has no turn of its own — anchor the confirmation to the
+        // session's current reply-target turn so a shared fold-back topic keeps
+        // it in-thread (same leak as the /repo command path).
+        await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
+      } else if (opts.confirmReplyText) {
+        await sessionReply(rootId, opts.confirmReplyText, undefined, fallbackTurnId(ds, undefined));
+      }
+      const cardToWithdraw = cardMessageId ?? ds.repoCardMessageId;
+      if (cardToWithdraw && larkAppId) deleteMessage(larkAppId, cardToWithdraw);
+      ds.repoCardMessageId = undefined;
     } finally {
       ds.pendingRepoCommitInFlight = false;
     }
     if (!committed) return;
-    // A card click has no turn of its own — anchor the confirmation to the
-    // session's current reply-target turn so a shared fold-back topic keeps
-    // it in-thread (same leak as the /repo command path).
-    if (!opts?.suppressConfirmReply) {
-      await sessionReply(rootId, t('cmd.repo.selected_in_pending', { name: dirLabel }, locTarget), undefined, fallbackTurnId(ds, undefined));
-    }
     logger.info(`[${tag(ds)}] Repo selected: ${dirPath}, spawning CLI`);
+    return;
   } else {
     // Mid-session repo switch — close old session, start fresh.
     // Safety net (mirrors the `/repo` text-command path): build the same
@@ -2104,22 +2130,28 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         const cwd = getSessionWorkingDir(ds);
         // Reuse the same claimed pending->worker transition as a normal repo
         // selection. This keeps buffering active across prompt preparation and
-        // makes skip/select races single-winner.
+        // makes skip/select races single-winner. Do NOT pin the resolved default
+        // cwd (often $HOME) onto session.workingDir — that would let sibling
+        // bots inherit HOME instead of getting their own repo card. Confirmation
+        // + card withdraw run under the claim inside commitRepoSelection.
         await commitRepoSelection(
-          { ds, rootId, cardMessageId: undefined, larkAppId, operatorOpenId, activeSessions, sessionReply },
+          { ds, rootId, cardMessageId, larkAppId, operatorOpenId, activeSessions, sessionReply },
           cwd,
           pathBasename(cwd) || cwd,
-          { suppressConfirmReply: true },
+          {
+            suppressConfirmReply: true,
+            confirmReplyText: t('cmd.skip.opened', { cwd }, locDs),
+            pinWorkingDir: false,
+          },
         );
         if (!ds.pendingRepo) {
-          await sessionReply(rootId, t('cmd.skip.opened', { cwd }, locDs));
           logger.info(`[${tag(ds)}] Skip repo, spawning CLI in ${cwd}`);
         }
       } else {
         await sessionReply(rootId, t('card.action.continue_using_current_repo', { cwd: getSessionWorkingDir(ds) }, locDs));
+        if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
+        ds.repoCardMessageId = undefined;
       }
-      if (cardMessageId && larkAppId) deleteMessage(larkAppId, cardMessageId);
-      ds.repoCardMessageId = undefined;
     }
 
     // Manual working-directory entry from the repo card form. The project scan

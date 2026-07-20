@@ -1538,10 +1538,19 @@ export async function handleCommand(
             ds!.pendingFollowUpTurnId = undefined;
             ds!.pendingTurnId = undefined;
             committed = true;
+
+            // Hold the claim through confirmation + card consumption. Releasing
+            // right after forkWorker lets a concurrent card click / second /repo
+            // see pendingRepo=false and treat this as a mid-session switch that
+            // kills the just-started worker and drops the first-turn task.
+            await sessionReply(rootId, replyText);
+            if (ds!.repoCardMessageId) {
+              deleteMessage(ds!.larkAppId, ds!.repoCardMessageId);
+              ds!.repoCardMessageId = undefined;
+            }
           } finally {
             ds!.pendingRepoCommitInFlight = false;
           }
-          if (committed) await sessionReply(rootId, replyText);
           return committed;
         };
 
@@ -1563,6 +1572,7 @@ export async function handleCommand(
               ds!.session.workingDir = selectedPath;
               ds!.session.riffRepoDirs = undefined;
               sessionStore.updateSession(ds!.session);
+              // forkPendingCli owns claim release + confirm reply + card withdraw.
               if (!await forkPendingCli(t('cmd.repo.selected_in_pending', { name: displayName }, loc), true)) {
                 return false;
               }
@@ -1614,10 +1624,10 @@ export async function handleCommand(
             ds!.hasHistory = false;
             forkWorker(ds!, '', false);
             await sessionReply(rootId, t('cmd.repo.switched_to', { name: displayName }, loc));
-          }
-          if (ds!.repoCardMessageId) {
-            deleteMessage(ds!.larkAppId, ds!.repoCardMessageId);
-            ds!.repoCardMessageId = undefined;
+            if (ds!.repoCardMessageId) {
+              deleteMessage(ds!.larkAppId, ds!.repoCardMessageId);
+              ds!.repoCardMessageId = undefined;
+            }
           }
           logger.info(`[${logTag}] Repo selected via ${how}: ${selectedPath}`);
           return true;
@@ -1788,11 +1798,10 @@ export async function handleCommand(
             break;
           }
           const cwd = getSessionWorkingDir(ds);
+          // bare /repo is the text twin of skip_repo: launch in the default
+          // cwd without pinning it (forkPendingCli does not write workingDir).
+          // Confirmation + card withdraw run under the claim inside forkPendingCli.
           await forkPendingCli(t('cmd.skip.opened', { cwd }, loc));
-          if (ds.repoCardMessageId) {
-            deleteMessage(ds.larkAppId, ds.repoCardMessageId);
-            ds.repoCardMessageId = undefined;
-          }
           logger.info(`[${logTag}] Bare /repo while pending → launch in workingDir ${cwd}`);
           break;
         }

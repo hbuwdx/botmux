@@ -125,7 +125,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 import { handleCardAction, type CardHandlerDeps } from '../src/im/lark/card-handler.js';
 import { forkWorker, killWorker, deliverEphemeralOrReply, deliverWriteLinkCard } from '../src/core/worker-pool.js';
-import { buildNewTopicCliInput, getAvailableBots } from '../src/core/session-manager.js';
+import { buildNewTopicCliInput, getAvailableBots, getSessionWorkingDir } from '../src/core/session-manager.js';
 import { getBot } from '../src/bot-registry.js';
 import { createSession, closeSession } from '../src/services/session-store.js';
 import { createRepoWorktree, pushWorktreeBranch, removeRepoWorktree } from '../src/services/git-worktree.js';
@@ -136,7 +136,7 @@ import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
 import type { ProjectInfo } from '../src/services/project-scanner.js';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -432,6 +432,77 @@ describe('repo select card — plain switch', () => {
     expect(forkWorker).toHaveBeenCalledTimes(1);
     expect(ds.pendingRepo).toBe(false);
     expect(ds.pendingRepoCommitInFlight).toBe(false);
+  });
+
+  it('holds the pending claim through post-fork confirmation so a second card click cannot mid-session-switch', async () => {
+    // Regression: previously pendingRepoCommitInFlight was cleared right after
+    // forkWorker, while sessionReply was still awaiting. A second card option
+    // in that window saw pendingRepo=false + claim released → treated as
+    // mid-session switch → killWorker + empty new session.
+    const ds = makeDs({
+      pendingRepo: true,
+      pendingPrompt: 'hello world',
+      pendingTurnId: 'om_first_turn',
+      repoCardMessageId: 'om_card',
+      worker: null,
+    });
+    const { deps, sessionReply } = makeDeps(ds);
+    let releaseReply: (() => void) | undefined;
+    sessionReply.mockImplementation(async () => new Promise<string>(res => {
+      releaseReply = () => res('om_confirm');
+    }));
+
+    const first = handleCardAction(makeSelectEvent('repo_switch', '/repos/alpha'), deps, APP_ID);
+    await vi.waitFor(() => expect(forkWorker).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(releaseReply).toBeTruthy());
+    expect(ds.pendingRepo).toBe(false);
+    expect(ds.pendingRepoCommitInFlight).toBe(true);
+    expect(ds.session.sessionId).toBe('uuid-old');
+
+    const late = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(late?.toast?.content).toContain('已有一个 worktree 正在创建');
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(killWorker).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(ds.session.sessionId).toBe('uuid-old');
+    expect(ds.workingDir).toBe('/repos/alpha');
+
+    releaseReply!();
+    await first;
+
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.pendingRepoCommitInFlight).toBe(false);
+    expect(ds.session.sessionId).toBe('uuid-old');
+    expect(deleteMessage).toHaveBeenCalledWith(APP_ID, 'om_card');
+    expect(ds.repoCardMessageId).toBeUndefined();
+  });
+
+  it('skip_repo does not persist the default $HOME cwd onto session.workingDir', async () => {
+    // Regression: skip reused commitRepoSelection which always pinned dirPath.
+    // getSessionWorkingDir falls back to $HOME when unset; pinning that lets a
+    // sibling bot inherit HOME instead of getting its own repo card.
+    const home = homedir();
+    vi.mocked(getSessionWorkingDir).mockReturnValueOnce(home);
+    const ds = makeDs({
+      pendingRepo: true,
+      pendingPrompt: 'hello world',
+      pendingTurnId: 'om_skip_home',
+      repoCardMessageId: 'om_card',
+      worker: null,
+    });
+    // Explicitly unpinned — the default-dir case.
+    ds.workingDir = undefined;
+    ds.session.workingDir = undefined;
+    const { deps, sessionReply } = makeDeps(ds);
+
+    await handleCardAction(makeSkipEvent(), deps, APP_ID);
+
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.pendingRepo).toBe(false);
+    expect(ds.workingDir).toBeUndefined();
+    expect(ds.session.workingDir).toBeUndefined();
+    expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('已直接开启会话');
+    expect(deleteMessage).toHaveBeenCalledWith(APP_ID, 'om_card');
   });
 
   it('keeps pending buffers and releases the claim when forkWorker throws, then allows retry', async () => {
