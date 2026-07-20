@@ -893,9 +893,9 @@ const FAILURE_TTL_MS = 60_000;
 let latestVersionCache: { value: string | null; at: number } | null = null;
 let changelogCache: { key: string; value: ChangelogResult; at: number } | null = null;
 
-async function cachedLatestVersion(now = Date.now()): Promise<string | null> {
+async function cachedLatestVersion(now = Date.now(), force = false): Promise<string | null> {
   const ttl = latestVersionCache?.value ? LATEST_TTL_MS : FAILURE_TTL_MS;
-  if (latestVersionCache && now - latestVersionCache.at < ttl) return latestVersionCache.value;
+  if (!force && latestVersionCache && now - latestVersionCache.at < ttl) return latestVersionCache.value;
   const value = await fetchLatestVersion();
   latestVersionCache = { value, at: now };
   return value;
@@ -2437,7 +2437,7 @@ const server = createServer(async (req, res) => {
       // button installs `@latest`). isNewerVersion uses semver precedence, so a
       // canary running AHEAD of the latest stable (e.g. 2.87.0-canary.0 vs
       // 2.86.0) is NOT flagged behind — exactly the canary case we want.
-      const latest = await cachedLatestVersion();
+      const latest = await cachedLatestVersion(Date.now(), url.searchParams.get('refresh') === '1');
       const cliUpdates = listCliRuntimeUpdateEntries(config.session.dataDir).map((entry) => ({
         cliId: entry.cliId,
         binPath: entry.binPath,

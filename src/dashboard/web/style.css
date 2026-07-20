@@ -7266,55 +7266,56 @@ button.dashboard-version-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 21px;
+  min-height: 22px;
   margin: 0;
-  padding: 3px 8px;
-  border: 1px solid color-mix(in srgb, var(--success) 38%, transparent);
-  border-radius: 7px;
-  background: var(--success-soft);
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--success) 24%, var(--border-soft));
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
   color: var(--success);
   box-shadow: none;
   cursor: pointer;
   font-family: "Geist Mono", var(--mono);
   font-size: 11px;
-  font-weight: 720;
+  font-weight: 700;
   line-height: 1;
 }
 button.dashboard-version-chip:hover,
 .dashboard-version-control.is-open button.dashboard-version-chip {
-  border-color: color-mix(in srgb, var(--success) 64%, transparent);
-  background: color-mix(in srgb, var(--success) 19%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--success);
 }
 button.dashboard-version-chip.has-update {
-  border-color: color-mix(in srgb, var(--warning) 48%, transparent);
-  background: var(--warning-soft);
-  color: var(--warning);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  color: var(--accent-strong);
 }
 button.dashboard-version-chip.has-update:hover,
 .dashboard-version-control.is-open button.dashboard-version-chip.has-update {
-  border-color: color-mix(in srgb, var(--warning) 72%, transparent);
-  background: color-mix(in srgb, var(--warning) 20%, var(--surface));
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 button.dashboard-version-chip.is-unknown {
-  border-color: var(--border);
-  background: var(--surface-muted);
+  border-color: var(--border-soft);
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
   color: var(--muted);
 }
 button.dashboard-version-chip.is-unknown:hover,
 .dashboard-version-control.is-open button.dashboard-version-chip.is-unknown {
-  border-color: var(--border);
-  background: var(--surface-muted);
-  color: var(--muted);
+  border-color: color-mix(in srgb, var(--accent) 46%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent-strong);
 }
 button.dashboard-version-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
-  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--border-soft));
+  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
   color: var(--danger);
 }
 button.dashboard-version-chip.is-error:hover,
 .dashboard-version-control.is-open button.dashboard-version-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 70%, transparent);
-  background: color-mix(in srgb, var(--danger) 20%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--border-soft));
+  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
 }
 .dashboard-version-dot {
   width: 6px;
@@ -7322,6 +7323,10 @@ button.dashboard-version-chip.is-error:hover,
   border-radius: 50%;
   background: currentColor;
   box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
+}
+button.dashboard-version-chip.has-update .dashboard-version-dot {
+  background: var(--warning);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 14%, transparent);
 }
 .dashboard-version-popover {
   position: absolute;
@@ -7347,6 +7352,12 @@ button.dashboard-version-chip.is-error:hover,
   font-size: 14px;
   font-weight: 760;
 }
+.dashboard-version-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+button.dashboard-version-refresh,
 button.dashboard-version-close {
   display: grid;
   place-items: center;
@@ -7366,9 +7377,26 @@ button.dashboard-version-close {
   font-weight: 400;
   line-height: 1;
 }
+button.dashboard-version-refresh svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+button.dashboard-version-refresh:hover:not(:disabled),
 button.dashboard-version-close:hover {
-  background: var(--surface-raised);
-  color: var(--fg);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent-strong);
+}
+button.dashboard-version-refresh:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+button.dashboard-version-refresh.is-refreshing svg {
+  animation: dashboard-update-spin 700ms linear infinite;
 }
 .dashboard-version-popover-body {
   display: grid;
@@ -7403,8 +7431,8 @@ button.dashboard-version-close:hover {
   color: var(--success);
 }
 .dashboard-version-current > span.has-update {
-  background: var(--warning-soft);
-  color: var(--warning);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 .dashboard-version-current > span.is-unknown {
   background: var(--surface-muted);
@@ -7421,12 +7449,36 @@ button.dashboard-version-close:hover {
   color: var(--danger);
   overflow-wrap: anywhere;
 }
+.dashboard-version-release-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  margin-top: 3px;
+  padding: 5px 9px;
+  border-radius: var(--radius-full);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  text-decoration: none;
+}
+.dashboard-version-release-link svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+.dashboard-version-release-link:hover {
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent-strong);
+}
 .dashboard-version-installs {
   width: 100%;
   margin-top: 5px;
   padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--border-soft));
   border-radius: var(--radius-sm);
-  background: var(--warning-soft);
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
   color: var(--warning);
   text-align: left;
   font-size: 11px;
@@ -7454,7 +7506,7 @@ button.dashboard-version-primary {
   min-height: 32px;
   margin: 0;
   padding: 6px 12px;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   box-shadow: none;
   cursor: pointer;
   font-size: 12px;
@@ -7467,14 +7519,18 @@ button.dashboard-version-secondary {
   color: var(--muted);
 }
 button.dashboard-version-primary {
-  border: 1px solid color-mix(in srgb, var(--warning) 58%, transparent);
-  background: var(--warning-soft);
-  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+  color: var(--accent-strong);
 }
-button.dashboard-version-secondary:hover { color: var(--fg); }
+button.dashboard-version-secondary:hover {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-soft));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  color: var(--accent-strong);
+}
 button.dashboard-version-primary:hover:not(:disabled) {
-  border-color: var(--warning);
-  background: color-mix(in srgb, var(--warning) 20%, var(--surface));
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 button.dashboard-version-primary:disabled {
   cursor: wait;
@@ -7492,7 +7548,8 @@ button.dashboard-version-primary:disabled {
   to { transform: rotate(360deg); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .dashboard-update-spinner { animation: none; }
+  .dashboard-update-spinner,
+  button.dashboard-version-refresh.is-refreshing svg { animation: none; }
 }
 .topbar-left {
   grid-column: 1;

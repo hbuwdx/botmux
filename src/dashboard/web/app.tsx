@@ -498,10 +498,15 @@ async function dashboardInstance(): Promise<string> {
   return instance;
 }
 
-function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX.Element | null {
+function TopbarVersionControl(props: {
+  status: BotmuxUpdateStatus | null;
+  onRefresh(): Promise<boolean>;
+}): JSX.Element | null {
   const { status } = props;
   const [open, setOpen] = useState(false);
   const [phase, setPhase] = useState<TopbarUpdatePhase>('idle');
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [errorDetail, setErrorDetail] = useState('');
   const actionInFlightRef = useRef(false);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -516,8 +521,9 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
 
   useEffect(() => {
     actionInFlightRef.current = false;
-    setOpen(false);
     setPhase('idle');
+    setRefreshing(false);
+    setRefreshFailed(false);
     setErrorDetail('');
   }, [status?.current, status?.latest]);
 
@@ -546,6 +552,7 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
   const behind = status.behind && !!status.latest;
   const unknown = !status.latest;
   const automatic = behind && status.updateSupported && !status.localDevInstall && status.node.ok;
+  const busy = phase === 'updating' || phase === 'restarting';
   const command = status.updateCommand ?? 'botmux update';
   const currentVersion = `v${status.current}`;
   const latestVersion = status.latest ? `v${status.latest}` : '';
@@ -589,6 +596,7 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
     if (actionInFlightRef.current) return;
 
     actionInFlightRef.current = true;
+    setRefreshFailed(false);
     setErrorDetail('');
     try {
       const previousInstance = await dashboardInstance();
@@ -601,13 +609,26 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
     }
   };
 
+  const refresh = async () => {
+    if (refreshing || busy) return;
+    setRefreshing(true);
+    setRefreshFailed(false);
+    try {
+      setRefreshFailed(!(await props.onRefresh()));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
   const message = phase === 'updating'
     ? t('update.updating', { command })
     : phase === 'restarting'
       ? t('update.restarting')
       : phase === 'error'
         ? t('update.updateFailed', { detail: errorDetail })
-        : behind
+        : refreshFailed
+          ? t('update.checkUnavailable')
+          : behind
           ? automatic
             ? t('update.versionUpgradePrompt', { version: latestVersion })
             : unavailableReason
@@ -621,7 +642,6 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
       : phase === 'idle'
         ? t('update.topbarAction')
         : t('update.topbarWorking');
-  const busy = phase === 'updating' || phase === 'restarting';
 
   return (
     <div ref={rootRef} className={`dashboard-version-control${open ? ' is-open' : ''}`}>
@@ -650,12 +670,27 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
         >
           <header className="dashboard-version-popover-head">
             <strong id="dashboard-version-title">{t('update.current')}</strong>
-            <button
-              type="button"
-              className="dashboard-version-close"
-              aria-label={t('update.topbarClose')}
-              onClick={() => setOpen(false)}
-            >×</button>
+            <div className="dashboard-version-head-actions">
+              <button
+                type="button"
+                className={`dashboard-version-refresh${refreshing ? ' is-refreshing' : ''}`}
+                aria-label={t(refreshing ? 'update.topbarRefreshing' : 'update.topbarRefresh')}
+                title={t(refreshing ? 'update.topbarRefreshing' : 'update.topbarRefresh')}
+                disabled={refreshing || busy}
+                onClick={() => void refresh()}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                  <path d="M13.2 5.7A5.8 5.8 0 1 0 13 10.8" />
+                  <path d="M13.2 2.8v2.9h-2.9" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="dashboard-version-close"
+                aria-label={t('update.topbarClose')}
+                onClick={() => setOpen(false)}
+              >×</button>
+            </div>
           </header>
           <div className="dashboard-version-popover-body">
             <div className="dashboard-version-current">
@@ -665,10 +700,21 @@ function TopbarVersionControl(props: { status: BotmuxUpdateStatus | null }): JSX
               </span>
             </div>
             <p
-              className={`dashboard-version-message${phase === 'error' ? ' is-error' : ''}`}
-              role={phase === 'error' ? 'alert' : 'status'}
+              className={`dashboard-version-message${phase === 'error' || refreshFailed ? ' is-error' : ''}`}
+              role={phase === 'error' || refreshFailed ? 'alert' : 'status'}
               aria-live="polite"
             >{message}</p>
+            <a
+              className="dashboard-version-release-link"
+              href="https://github.com/deepcoldy/botmux/releases"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true">
+                <path d="M8 1.5a6.5 6.5 0 0 0-2.1 12.65c.33.06.45-.14.45-.32v-1.26c-1.84.4-2.23-.78-2.23-.78-.3-.76-.73-.96-.73-.96-.6-.41.05-.4.05-.4.66.05 1 .68 1 .68.59 1 1.54.72 1.92.55.06-.42.23-.72.42-.88-1.47-.17-3.02-.74-3.02-3.28 0-.72.26-1.32.68-1.78-.07-.17-.3-.84.07-1.75 0 0 .56-.18 1.79.68A6.2 6.2 0 0 1 8 4.63a6.2 6.2 0 0 1 1.71.22c1.23-.86 1.79-.68 1.79-.68.37.91.14 1.58.07 1.75.42.46.68 1.06.68 1.78 0 2.55-1.55 3.11-3.03 3.28.24.21.45.61.45 1.23v1.62c0 .18.12.38.46.32A6.5 6.5 0 0 0 8 1.5Z" />
+              </svg>
+              <span>{t('update.changelogViewOnGitHub')}</span>
+            </a>
             {behind && status.installs.multiple ? (
               <details className="dashboard-version-installs">
                 <summary>{t('update.multiInstallWarn')}</summary>
@@ -764,7 +810,7 @@ function DashboardShell(): JSX.Element {
                 <strong className="brand-wordmark">Botmux</strong>
                 <span className="brand-product">Dashboard</span>
               </a>
-              <TopbarVersionControl status={botmuxUpdateStatus} />
+              <TopbarVersionControl status={botmuxUpdateStatus} onRefresh={() => checkUpdateBadge(true)} />
             </div>
           </div>
           <div className="topbar-actions">
@@ -958,11 +1004,11 @@ async function persistLocale(locale: DashboardLocale): Promise<void> {
   } catch { /* best-effort; UI already switched locally */ }
 }
 
-async function checkUpdateBadge(): Promise<void> {
-  if (!isAuthed) return;
+async function checkUpdateBadge(force = false): Promise<boolean> {
+  if (!isAuthed) return false;
   try {
-    const r = await fetch('/api/update/status');
-    if (!r.ok) return;
+    const r = await fetch(`/api/update/status${force ? '?refresh=1' : ''}`, { cache: 'no-store' });
+    if (!r.ok) return false;
     const j = await r.json();
     botmuxUpdateStatus = j as BotmuxUpdateStatus;
     const runtime = Array.isArray(j.cliUpdates)
@@ -982,7 +1028,10 @@ async function checkUpdateBadge(): Promise<void> {
       latestVersion = null;
     }
     renderShell();
-  } catch { /* best-effort */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function renderAuthRequiredPage(host: HTMLElement): void {
