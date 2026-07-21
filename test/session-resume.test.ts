@@ -139,6 +139,7 @@ vi.mock('../src/core/session-activity.js', () => ({
 
 import { restoreActiveSessions, resumeSession } from '../src/core/session-manager.js';
 import { restoreUsageLimitRuntimeState, closeSession, forkAdoptWorker } from '../src/core/worker-pool.js';
+import { TmuxBackend } from '../src/adapters/backend/tmux-backend.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { sessionKey } from '../src/core/types.js';
 import type { DaemonSession } from '../src/core/types.js';
@@ -486,6 +487,37 @@ describe('resumeSession', () => {
         expect.objectContaining({ adoptedFrom: s.adoptedFrom }),
         { restoredFromMetadata: true },
       );
+      expect(closeSession).not.toHaveBeenCalledWith(s.sessionId);
+    });
+
+    it('restores a renamed adopt session from metadata without probing a bmx backing session', async () => {
+      daemonConfig.backendType = 'tmux';
+      const s = sessionStore.createSession('oc_adopt_renamed', 'om_adopt_renamed', 'Renamed topic');
+      s.larkAppId = 'app_test';
+      s.scope = 'thread';
+      s.cliId = 'claude-code';
+      s.adoptedFrom = {
+        source: 'tmux',
+        tmuxTarget: 'external:0.0',
+        originalCliPid: 12345,
+        cliId: 'claude-code',
+        cwd: '/tmp/adopted',
+      };
+      sessionStore.updateSession(s);
+      vi.mocked(forkAdoptWorker).mockClear();
+      vi.mocked(TmuxBackend.probeSession).mockClear();
+
+      const map = new Map<string, DaemonSession>();
+      wp.registry = map;
+      await restoreActiveSessions(map);
+
+      expect(sessionStore.getSession(s.sessionId)?.status).toBe('active');
+      expect(map.get(sessionKey('om_adopt_renamed', 'app_test'))?.session.sessionId).toBe(s.sessionId);
+      expect(forkAdoptWorker).toHaveBeenCalledWith(
+        expect.objectContaining({ adoptedFrom: s.adoptedFrom }),
+        { restoredFromMetadata: true },
+      );
+      expect(TmuxBackend.probeSession).not.toHaveBeenCalled();
       expect(closeSession).not.toHaveBeenCalledWith(s.sessionId);
     });
 

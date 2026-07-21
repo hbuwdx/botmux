@@ -1198,8 +1198,9 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     // 'thread' — that matches the legacy thread-only behaviour.
     const scope: 'thread' | 'chat' = session.scope === 'chat' ? 'chat' : 'thread';
 
-    // Adopt sessions: restore if original CLI is still alive, otherwise close
-    if (session.title?.startsWith('Adopt:') && session.adoptedFrom) {
+    // Persisted metadata is the authoritative adopt marker. The title is
+    // user-editable via /rename and must not change restore semantics.
+    if (session.adoptedFrom) {
       const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
       const validation = adopted.zellijPaneId
         ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid, adopted.cliId) ? 'alive' : 'missing')
@@ -1263,7 +1264,8 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adoptTargetLabel(adopted)}, scope: ${scope})`);
       continue;
     }
-    // Adopt sessions without persisted metadata — close (legacy)
+    // Title-only adopt sessions have no target metadata and can only come from
+    // legacy records. They cannot be validated or safely restored.
     if (session.title?.startsWith('Adopt:')) {
       logger.debug(`Closing adopt session ${session.sessionId} (no persisted metadata)`);
       sessionStore.closeSession(session.sessionId);

@@ -337,7 +337,7 @@ function findCliProcess(
   rootPid: number,
   maxDepth: number,
   filterCliId?: CliId,
-): { pid: number; cliId: CliId } | undefined {
+): { pid: number; cliId: CliId; matchedByComm: boolean } | undefined {
   // BFS through the process tree
   let current = [rootPid];
 
@@ -347,8 +347,9 @@ function findCliProcess(
     for (const pid of current) {
       const comm = readComm(pid);
       if (comm) {
+        const commCliId = cliIdForComm(comm, filterCliId);
         const cliId = cliIdFromCommArgv(comm, readCmdline(pid), filterCliId);
-        if (cliId) return { pid, cliId };
+        if (cliId) return { pid, cliId, matchedByComm: commCliId === cliId };
       }
       next.push(...getChildPids(pid));
     }
@@ -722,11 +723,12 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
       if (filterCliId && match.cliId !== filterCliId) continue;
 
       // npm's `codex` shim can remain as a Node launcher whose argv matches
-      // before generic discovery reaches the native child. Adopt the native
-      // pid so worker-side late transcript binding keeps polling the process
-      // that actually opens rollout files. Other CLIs preserve legacy pid
-      // selection; their wrapper behavior is handled by explicit wrapperCli.
-      const cliPid = match.cliId === 'codex'
+      // before generic discovery reaches the native child. Only follow that
+      // launcher: a process whose comm is already `codex` is the selected CLI
+      // itself and may legitimately have another Codex deeper in its tree.
+      // Other CLIs preserve legacy pid selection; their wrapper behavior is
+      // handled by explicit wrapperCli.
+      const cliPid = match.cliId === 'codex' && !match.matchedByComm
         ? (findLaunchedCliPid(match.pid, 'codex') ?? match.pid)
         : match.pid;
 
