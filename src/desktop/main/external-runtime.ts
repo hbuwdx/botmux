@@ -209,10 +209,11 @@ function runWhich(execFile: ExecFile, platform: NodeJS.Platform): string[] {
 // Runtime state is polled every ~5s (createRuntimeStateMonitor) and each poll
 // re-runs discovery. Spawning up to 4 rc-sourcing shells per poll is far too
 // heavy, so the probe result is cached: shell PATH essentially never changes
-// mid-run. A miss (no bins) is cached briefly so a user who installs botmux
-// while the app shows "install CLI" is picked up within a few polls.
+// mid-run. A miss (no bins) expires within one poll period so a user who
+// installs botmux while the app shows "install CLI" (or hits an explicit
+// retry) never sees a stale miss for more than ~one refresh.
 const SHELL_PROBE_HIT_TTL_MS = 5 * 60_000;
-const SHELL_PROBE_MISS_TTL_MS = 20_000;
+const SHELL_PROBE_MISS_TTL_MS = 5_000;
 let shellProbeCache: { at: number; value: { bins: string[]; pathEnv?: string } } | null = null;
 
 /**

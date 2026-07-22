@@ -80,11 +80,13 @@ describe('desktop PM2 app listing', () => {
     child.emit('close', 0);
     await expect(promise).resolves.toEqual([]);
     const env = (spawn.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
-    // Bundled node stays first (pm2 itself must run on it); the probed shell
-    // PATH follows so the pm2 daemon's sticky env can resolve user CLIs.
+    // Must match the daemon-start ordering exactly (buildBundledPath): pm2's
+    // sticky daemon env propagates into resurrected apps, so which node a
+    // per-bot CLI resolves must not depend on pm2 startup order. pm2 itself is
+    // launched via the absolute nodePath, never through this PATH.
     expect(env.PATH).toBe([
-      '/Applications/Botmux.app/Contents/Resources/node/darwin-arm64/bin',
       '/Users/me/.nvm/versions/node/v22.22.2/bin',
+      '/Applications/Botmux.app/Contents/Resources/node/darwin-arm64/bin',
       '/opt/homebrew/bin',
       '/usr/local/bin',
       '/usr/bin',

@@ -2,6 +2,7 @@ import { spawn as spawnProcess, type ChildProcessWithoutNullStreams } from 'node
 import { existsSync as pathExistsSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import type { DesktopPaths } from '../shared/types.js';
+import { buildBundledPath } from './node-command.js';
 import type { RuntimeLaunchTarget } from './runtime-service.js';
 import { parsePm2Apps, type Pm2AppSummary } from './runtime-source.js';
 
@@ -38,9 +39,11 @@ export function listPm2Apps(
     // repaired PATH so discovery does not depend on the user's shell startup.
     // jlist may be the first pm2 contact and thus start the pm2 daemon, whose
     // env sticks and propagates into resurrected apps — so the bundled branch
-    // must carry the probed shell PATH too, not only the daemon-start spawn.
+    // carries the probed shell PATH with the SAME ordering as the daemon-start
+    // spawn (buildBundledPath); pm2 itself is launched via the absolute
+    // nodePath and never resolves node through this PATH.
     PATH: runtime.kind === 'bundled'
-      ? withRuntimePath(baseEnv.PATH, runtime.nodePath, deps.pathEnv)
+      ? buildBundledPath(baseEnv.PATH, runtime.nodePath, deps.pathEnv)
       : withRuntimePath(baseEnv.PATH, runtime.binPath, runtime.pathEnv),
     PM2_HOME: paths.pm2Home,
     SESSION_DATA_DIR: paths.dataDir,
