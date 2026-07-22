@@ -142,13 +142,6 @@ export const botmuxScheduleExecutor: SideEffectingExecutor<ScheduleInput, Schedu
         message: 'topic execution requires rootMessageId',
       };
     }
-    if (input.executionPosition === 'new-topic' && input.silent) {
-      return {
-        ok: false,
-        errorCode: 'HOST_SCHEDULE_SILENT_NEW_TOPIC_UNSUPPORTED',
-        message: 'new-topic execution requires a visible topic seed',
-      };
-    }
     if (input.parsed.kind !== 'once') return { ok: true };
     const runAtMs = input.parsed.runAt ? Date.parse(input.parsed.runAt) : Number.NaN;
     // Keep exactly the scheduler's two-minute one-shot catch-up window. Once

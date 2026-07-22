@@ -543,10 +543,7 @@ describe('botmuxScheduleExecutor invoke()', () => {
     expect(botmuxScheduleExecutor.validateBeforeIntent!(
       { ...freshTopic, silent: true },
       Date.now(),
-    )).toMatchObject({
-      ok: false,
-      errorCode: 'HOST_SCHEDULE_SILENT_NEW_TOPIC_UNSUPPORTED',
-    });
+    )).toEqual({ ok: true });
     expect(botmuxScheduleExecutor.validateBeforeIntent!(
       parseScheduleInput({ ...base, schedule: 'every 30m', executionPosition: 'topic' }),
       Date.now(),

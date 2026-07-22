@@ -131,7 +131,7 @@ import type { CliId } from '../adapters/cli/types.js';
 import { updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, ScheduleExecutionPosition, Session } from '../types.js';
-import type { DaemonSession } from './types.js';
+import { sessionAnchorId, type DaemonSession } from './types.js';
 import { attachSkillPolicy, detachSkillPolicy } from './skills/im-command.js';
 import { readSkillRegistry } from '../services/skill-registry-store.js';
 
@@ -1128,7 +1128,7 @@ ipcRoute('POST', '/api/sessions/migrate-to-chat', async (req, res) => {
 
   let ds: ReturnType<typeof findActiveBySessionId> = undefined;
   for (const candidate of reg.values()) {
-    const candAnchor = candidate.scope === 'chat' ? candidate.chatId : candidate.session.rootMessageId;
+    const candAnchor = sessionAnchorId(candidate);
     if (candAnchor === sourceAnchor && candidate.larkAppId === cachedLarkAppId) {
       ds = candidate;
       break;
@@ -1370,9 +1370,6 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   if (!chatId) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'chatId' });
   if (executionPosition === 'topic' && !rootMessageId) {
     return jsonRes(res, 400, { ok: false, error: 'topic_root_required', field: 'rootMessageId' });
-  }
-  if (executionPosition === 'new-topic' && silent) {
-    return jsonRes(res, 400, { ok: false, error: 'silent_new_topic_exclusive', field: 'silent' });
   }
   // Note: bot↔chat membership is intentionally NOT validated here.
   // listChatBotMembers returns [] both when the API is unavailable and when

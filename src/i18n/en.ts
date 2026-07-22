@@ -493,7 +493,7 @@ export const messages: Record<string, string> = {
   'schedule.position_top_level': 'Execution position: group top level (session shape follows the regular-group mode)',
   'schedule.position_topic': 'Execution position: inside the current topic',
   'schedule.silent_note': 'Silent mode: fires post no "started" banner; the model only sends (botmux send) when the alert condition is met, otherwise stays fully silent',
-  'schedule.silent_new_topic_conflict': '"Silent" and "new topic" cannot be combined: a new topic requires a first message. For "open a topic only on alert", instruct the model in the prompt to use a top-level botmux send when alerting.',
+  'schedule.silent_new_topic_conflict': 'A silent fresh topic is deferred: no alert closes the hidden session, and the first botmux send creates and binds the topic.',
   'schedule.parse_failed': 'Cannot parse schedule. Use a natural-language form:\n\n/schedule daily 17:50 summarize today\'s AI news\n/schedule weekdays 9:00 check service status\n/schedule mondays 10:00 generate weekly report\n/schedule hourly check service health\n/schedule every 30 minutes ping the service\n/schedule 1st of each month 9:00 generate monthly report\n\nManagement:\n/schedule list — list all tasks\n/schedule remove <id> — delete a task\n/schedule enable <id> — enable a task\n/schedule disable <id> — disable a task\n/schedule run <id> — run once now',
 
   // ─── /help ───────────────────────────────────────────────────────────────
@@ -691,6 +691,7 @@ export const messages: Record<string, string> = {
   'card.action.resume_anchor_occupied': '⚠️ This topic already has a newer session{detail}; cannot resume the older one.',
   'card.action.resume_anchor_holder': ' (holder: {short})',
   'card.action.resume_adopt_unsupported': '⚠️ Adopted sessions cannot be resumed.',
+  'card.action.resume_deferred_unmaterialized': '⚠️ This silent scheduled run never created a topic. Its hidden session is audit-only and cannot be resumed.',
   'card.action.disconnected': '⏏ Disconnected. The original CLI is untouched.',
   'card.voice.toast_wait': '🔊 Generating a voice summary, hang tight…',
   'card.voice.toast_already': '🔊 A voice summary for this reply is already on the way.',
@@ -899,7 +900,7 @@ export const messages: Record<string, string> = {
   'card.dashboard.schedules.pause.disabled.alreadyPaused': 'Schedule is already paused',
   'card.dashboard.schedules.resume.disabled.alreadyEnabled': 'Schedule is already enabled',
   'card.dashboard.schedules.delivery.disabled.local': 'Local-only delivery cannot be changed from the card',
-  'card.dashboard.schedules.delivery.disabled.silent': 'Silent execution cannot create a new topic because a topic needs a seed message',
+  'card.dashboard.schedules.delivery.disabled.silent': 'A silent fresh topic is deferred until the first botmux send',
   'card.dashboard.schedules.delivery.disabled.topicRootRequired': 'This task has no retained topic root; set a topic root message ID in Dashboard first',
   'card.dashboard.schedules.delivery.disabled.alreadyOrigin': 'Already running inside the topic',
   'card.dashboard.schedules.delivery.disabled.alreadyTopLevel': 'Already running at group top level',

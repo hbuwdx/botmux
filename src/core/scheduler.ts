@@ -591,9 +591,6 @@ export function addTask(params: {
   if (executionPosition === 'topic' && !params.rootMessageId) {
     throw new Error('topic_root_required');
   }
-  if (executionPosition === 'new-topic' && params.silent) {
-    throw new Error('silent_new_topic_exclusive');
-  }
   const topicTitle = normalizeTopicTitle(params.topicTitle);
   const scope: 'thread' | 'chat' = executionPosition === 'topic' ? 'thread' : 'chat';
   const task = scheduleStore.createTask({
@@ -766,7 +763,7 @@ export function toggleDelivery(id: string): {
   const current = resolveTaskExecutionPosition(task);
   let executionPosition: ScheduleExecutionPosition;
   if (current === 'topic') executionPosition = 'top-level';
-  else if (current === 'top-level') executionPosition = task.silent ? (task.rootMessageId ? 'topic' : 'top-level') : 'new-topic';
+  else if (current === 'top-level') executionPosition = 'new-topic';
   else executionPosition = task.rootMessageId ? 'topic' : 'top-level';
   if (executionPosition === current) return { ok: false, error: 'topic_root_required' };
   const scope: 'chat' | 'thread' = executionPosition === 'topic' ? 'thread' : 'chat';
@@ -816,11 +813,6 @@ export function updateTask(
   const nextRootMessageId = updates.rootMessageId ?? task.rootMessageId;
   if (executionPosition === 'topic' && !nextRootMessageId) {
     return { ok: false, error: 'topic_root_required' };
-  }
-  const nextSilent = updates.silent ?? task.silent === true;
-  const nextPosition = executionPosition ?? resolveTaskExecutionPosition(task);
-  if (nextPosition === 'new-topic' && nextSilent) {
-    return { ok: false, error: 'silent_new_topic_exclusive' };
   }
   if (updates.topicTitle !== undefined) {
     try { patch.topicTitle = normalizeTopicTitle(updates.topicTitle); }

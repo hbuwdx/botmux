@@ -107,8 +107,8 @@ describe('scheduler.toggleDelivery', () => {
     const { toggleDelivery } = await import('../src/core/scheduler.js');
     const id = seed('origin', { scope: 'chat', rootMessageId: 'om_root', silent: true });
     const r = toggleDelivery(id);
-    expect(r).toMatchObject({ ok: true, executionPosition: 'topic' });
-    expect(store.get(id)!.scope).toBe('thread');
+    expect(r).toMatchObject({ ok: true, executionPosition: 'new-topic' });
+    expect(store.get(id)!.scope).toBe('chat');
     expect(store.get(id)!.silent).toBe(true);
   });
 

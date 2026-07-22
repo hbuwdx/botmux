@@ -119,6 +119,19 @@ export interface Session {
   /** This chat-scoped automation deliberately has no topic seed. Prevents the
    *  chat-mode conversion guard from treating chatId as a replyable message id. */
   externalTriggerTopicless?: boolean;
+  /** A silent `executionPosition='new-topic'` schedule starts without a Lark
+   *  root message. `routingAnchor` is the durable daemon-internal identity for
+   *  that one run; the first successful `botmux send` materializes a real root
+   *  and records it in the deferred-topic binding sidecar. Keeping the virtual
+   *  anchor after materialization prevents this isolated session from
+   *  collapsing into the ordinary chat-scope slot. */
+  deferredScheduleRun?: {
+    taskId: string;
+    turnId: string;
+    routingAnchor: string;
+    topicTitle?: string;
+    createdAt: string;
+  };
   /** Dedicated VC meeting consumer session identity. These sessions share the
    *  listener chat as their output route, but MUST NOT share the ordinary
    *  chat-scope routing slot (or another meeting/member's CLI context). */
@@ -479,9 +492,9 @@ export interface ScheduledTask {
    *  and the spawned turn suppresses daemon-initiated group output (streaming
    *  card, bridge final_output forwarding). The prompt is wrapped with a hint
    *  telling the model to `botmux send` only when its alert condition is met —
-   *  "符合条件报警、不符合条件静默". Supported for both chat-scope (group
-   *  top-level) and thread-scope (existing topic) schedules, but incompatible
-   *  with executionPosition='new-topic' because that needs a visible seed. */
+   *  "符合条件报警、不符合条件静默". Supported for chat-scope, retained-topic,
+   *  and fresh-topic schedules; a silent fresh topic is created lazily by the
+   *  first successful `botmux send`. */
   silent?: boolean;
   // DEPRECATED — kept only for backward-compat migration
   type?: 'cron' | 'interval' | 'once';
@@ -529,7 +542,7 @@ export interface CliTurnPayload {
 
 /** Messages sent from Daemon to Worker */
 export type DaemonToWorker =
-  | { type: 'init'; sessionId: string; chatId: string; chatType?: 'group' | 'p2p'; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; codexRpcInput?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; riffParentTaskId?: string; riffRepoDirs?: string[]; prompt: string; promptCodexAppInput?: CodexAppTurnInput; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; dispatchAttempt?: number; vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
+  | { type: 'init'; sessionId: string; chatId: string; chatType?: 'group' | 'p2p'; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; codexRpcInput?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; riffParentTaskId?: string; riffRepoDirs?: string[]; deferredScheduleRun?: Session['deferredScheduleRun']; prompt: string; promptCodexAppInput?: CodexAppTurnInput; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; dispatchAttempt?: number; vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
   | { type: 'message'; content: string; codexAppInput?: CodexAppTurnInput; turnId?: string; dispatchAttempt?: number; vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin }
   /** Literal slash-command passthrough. `followUpContent` rides along so the
    *  worker enqueues it strictly AFTER the slash command's Enter — two separate
@@ -652,5 +665,6 @@ export type WorkerToDaemon =
       errorCode?: string;
     }
   | { type: 'adopt_preamble'; userText: string; assistantText: string; turnId?: string }
+  | { type: 'deferred_topic_materialized'; sessionId: string; turnId: string; rootMessageId: string }
   | { type: 'riff_access_url'; accessUrl: string; directAccessUrl?: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'riff_task_id'; taskId: string | null };

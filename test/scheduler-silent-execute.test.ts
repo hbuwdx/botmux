@@ -7,7 +7,8 @@
  *    the CLI prompt is wrapped with the silent-schedule hint
  *  - loud fire keeps posting the banner (control)
  *  - explicit fresh-topic fires post their configured title and own a new anchor
- *  - fresh-topic and silent are rejected because a topic needs a visible seed
+ *  - silent fresh-topic fires start at a durable virtual anchor and defer the
+ *    visible Lark root until the first botmux send
  *  - chat-scope fires honor the bot/chat regular-group mode for flat, shared,
  *    and independent-topic routing
  *  - live-session injection: silent id follows the queued turn even when busy
@@ -208,16 +209,38 @@ describe('executeScheduledTask — fresh-topic execution', () => {
     expect(active.get(sessionKey('om_banner_123', APP))?.scope).toBe('thread');
   });
 
-  it('rejects fresh-topic + silent because a new topic needs a visible seed', async () => {
+  it('starts fresh-topic + silent at an isolated virtual anchor without a visible seed', async () => {
     const active = new Map<string, DaemonSession>();
-    await expect(executeScheduledTask(baseTask({
+    await executeScheduledTask(baseTask({
       executionPosition: 'new-topic',
       silent: true,
-    }), active, refreshCliVersion)).rejects.toThrow('silent_new_topic_exclusive');
+      topicTitle: '按需巡检告警',
+    }), active, refreshCliVersion);
 
     expect(sendMessageMock).not.toHaveBeenCalled();
     expect(replyMessageMock).not.toHaveBeenCalled();
-    expect(active.size).toBe(0);
+    expect(active.size).toBe(1);
+    expect(forkWorkerMock).toHaveBeenCalledTimes(1);
+    const [[key, ds]] = [...active.entries()];
+    expect(key).toMatch(/^schedule-run:task0001:[^:]+::cli_app_test$/);
+    expect(ds.scope).toBe('chat');
+    expect(ds.session.rootMessageId).toBe(ds.session.deferredScheduleRun?.routingAnchor);
+    expect(ds.session.deferredScheduleRun).toMatchObject({
+      taskId: 'task0001',
+      turnId: forkedTurnId(),
+      topicTitle: '按需巡检告警',
+    });
+    expect(ds.silentScheduledTurns?.has(forkedTurnId())).toBe(true);
+  });
+
+  it('gives every silent fresh-topic fire a distinct session and virtual anchor', async () => {
+    const active = new Map<string, DaemonSession>();
+    await executeScheduledTask(baseTask({ executionPosition: 'new-topic', silent: true }), active, refreshCliVersion);
+    await executeScheduledTask(baseTask({ executionPosition: 'new-topic', silent: true }), active, refreshCliVersion);
+
+    expect(active.size).toBe(2);
+    expect(new Set([...active.values()].map(ds => ds.session.sessionId)).size).toBe(2);
+    expect(new Set([...active.values()].map(ds => ds.session.deferredScheduleRun?.routingAnchor)).size).toBe(2);
   });
 
   it('thread task without a real root safely degrades to silent chat scope', async () => {

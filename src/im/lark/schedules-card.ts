@@ -707,8 +707,6 @@ function mapDeliveryDisabledReason(reasonKey: string | undefined): string | unde
   switch (reasonKey) {
     case 'schedules.action.delivery.local':
       return 'card.dashboard.schedules.delivery.disabled.local';
-    case 'schedules.action.delivery.silentOriginOnly':
-      return 'card.dashboard.schedules.delivery.disabled.silent';
     case 'schedules.action.delivery.topicRootRequired':
       return 'card.dashboard.schedules.delivery.disabled.topicRootRequired';
     case 'schedules.action.delivery.alreadyOrigin':

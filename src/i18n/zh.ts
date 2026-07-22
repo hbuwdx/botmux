@@ -496,7 +496,7 @@ export const messages: Record<string, string> = {
   'schedule.position_top_level': '执行位置：群消息顶层（后续会话形态跟随普通群会话模式）',
   'schedule.position_topic': '执行位置：当前话题下',
   'schedule.silent_note': '静默模式: 触发时不发「执行中」提示，模型判断满足条件才 botmux send 报警，否则完全静默',
-  'schedule.silent_new_topic_conflict': '「静默」与「新话题」不能同时使用：新话题必须由首条消息开启。要「有异常才开新话题」，可在任务描述里让模型报警时用 botmux send 顶层发送。',
+  'schedule.silent_new_topic_conflict': '静默新话题会延迟创建：无通知时自动关闭隐藏会话，首次 botmux send 才创建并绑定话题。',
   'schedule.parse_failed': '无法解析定时任务，请使用自然语言格式：\n\n/schedule 每日17:50 帮我看看今天AI圈有什么新闻\n/schedule 工作日每天9:00 检查服务状态\n/schedule 每周一10:00 生成周报\n/schedule 每小时 检查服务健康状态\n/schedule 每30分钟 ping一下服务\n/schedule 每月1号9:00 生成月报\n\n管理命令：\n/schedule list — 查看所有任务\n/schedule remove <id> — 删除任务\n/schedule enable <id> — 启用任务\n/schedule disable <id> — 禁用任务\n/schedule run <id> — 立即执行一次',
 
   // ─── /help ───────────────────────────────────────────────────────────────
@@ -694,6 +694,7 @@ export const messages: Record<string, string> = {
   'card.action.resume_anchor_occupied': '⚠️ 当前话题已有新会话{detail}，无法恢复旧会话。',
   'card.action.resume_anchor_holder': '（占用者：{short}）',
   'card.action.resume_adopt_unsupported': '⚠️ adopt 接管会话不支持 resume。',
+  'card.action.resume_deferred_unmaterialized': '⚠️ 该静默定时轮次未创建话题，隐藏会话只保留审计记录，无法恢复。',
   'card.action.disconnected': '⏏ 已断开，原 CLI 会话不受影响',
   'card.voice.toast_wait': '🔊 正在生成语音总结，请耐心等待…',
   'card.voice.toast_already': '🔊 这条已经在生成语音啦，请稍候',
@@ -902,7 +903,7 @@ export const messages: Record<string, string> = {
   'card.dashboard.schedules.pause.disabled.alreadyPaused': '任务已暂停',
   'card.dashboard.schedules.resume.disabled.alreadyEnabled': '任务已启用',
   'card.dashboard.schedules.delivery.disabled.local': '本地投递模式不支持在卡片中切换',
-  'card.dashboard.schedules.delivery.disabled.silent': '静默执行不能切换为每次新话题（新话题需要首条消息）',
+  'card.dashboard.schedules.delivery.disabled.silent': '静默新话题将在首次 botmux send 时延迟创建',
   'card.dashboard.schedules.delivery.disabled.topicRootRequired': '该任务没有可用的话题根消息，需先在 Dashboard 中填写目标话题根消息 ID',
   'card.dashboard.schedules.delivery.disabled.alreadyOrigin': '已在话题下执行',
   'card.dashboard.schedules.delivery.disabled.alreadyTopLevel': '已在群消息顶层执行',

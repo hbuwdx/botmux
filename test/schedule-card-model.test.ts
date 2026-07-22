@@ -195,7 +195,7 @@ describe('schedule-card-model · invariants', () => {
     expect(resolveScheduleExecutionPlacement(makeTask({ deliver: 'local' }))).toBe('local');
   });
 
-  it('allows silent topic/top-level changes but rejects fresh-topic execution', () => {
+  it('allows silent execution at every position, including lazy fresh topics', () => {
     const topLevel = makeTask({ scope: 'chat', rootMessageId: 'om_root', silent: true });
     expect(computeDeliveryButtonAvailability(topLevel, 'topic')).toEqual({ enabled: true });
     expect(computeDeliveryButtonAvailability({ ...topLevel, rootMessageId: undefined }, 'topic'))
@@ -203,7 +203,7 @@ describe('schedule-card-model · invariants', () => {
     const topic = makeTask({ scope: 'thread', rootMessageId: 'om_root', silent: true });
     expect(computeDeliveryButtonAvailability(topic, 'top-level')).toEqual({ enabled: true });
     expect(computeDeliveryButtonAvailability(topic, 'new-topic'))
-      .toEqual({ enabled: false, reasonKey: 'schedules.action.delivery.silentOriginOnly' });
+      .toEqual({ enabled: true });
   });
 
   it('filter / paginate / toRow do not mutate the input list', () => {

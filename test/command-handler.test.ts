@@ -2845,7 +2845,7 @@ describe('handleCommand', () => {
       expect(replyContent).toContain('静默模式');
     });
 
-    it('rejects 静默 + 新话题 because creating a topic requires a visible seed', async () => {
+    it('accepts 静默 + 新话题 and persists the lazy fresh-topic position', async () => {
       vi.mocked(scheduler.parseNaturalSchedule).mockReturnValue({
         parsed: { kind: 'cron', expr: '0 9 * * *', display: '每日 09:00' },
         prompt: '静默 新话题 生成日报',
@@ -2864,10 +2864,16 @@ describe('handleCommand', () => {
       const deps = makeDeps(ds);
       await handleCommand('/schedule', ROOT_ID, makeLarkMessage('/schedule 每日9:00 静默 新话题 生成日报'), deps, LARK_APP_ID);
 
-      expect(scheduler.addTask).not.toHaveBeenCalled();
+      expect(scheduler.addTask).toHaveBeenCalledTimes(1);
+      expect(scheduler.addTask).toHaveBeenCalledWith(expect.objectContaining({
+        prompt: '生成日报',
+        scope: 'chat',
+        executionPosition: 'new-topic',
+        silent: true,
+      }));
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(replyContent).toContain('新话题');
-      expect(replyContent).toContain('静默');
+      expect(replyContent).toContain('静默模式');
     });
   });
 

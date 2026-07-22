@@ -41,7 +41,7 @@ import type { CliTurnPayload, CodexAppAdditionalContextEntry, CodexAppTurnInput,
 import { addCodexAppContext } from '../utils/codex-app-context.js';
 import type { MessageResource } from '../im/lark/message-parser.js';
 import type { ResolvedSender } from '../im/lark/identity-cache.js';
-import { activeSessionKey, sessionKey, sessionAnchorId } from './types.js';
+import { activeSessionKey, sessionKey, sessionAnchorId, storedSessionAnchorId } from './types.js';
 import type { DaemonSession } from './types.js';
 import { announceSessionRow, markSessionActivity, announcePendingRepoSession } from './session-activity.js';
 import { scanMultipleProjects } from '../services/project-scanner.js';
@@ -57,6 +57,7 @@ import { armSilentScheduledTurn, disarmSilentScheduledTurn } from './silent-sche
 import { getAttachmentsDir } from './attachment-path.js';
 import { resolveRegularGroupMode } from '../services/chat-reply-mode-store.js';
 import { beginReplyTargetTurn } from './reply-target.js';
+import { readDeferredTopicBinding, removeDeferredTopicBinding } from './deferred-topic-binding.js';
 
 export { getAttachmentsDir } from './attachment-path.js';
 
@@ -1346,6 +1347,33 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       // patch a streaming card. Cleared on the first real CLI input.
       suppressRecoveryCard: true,
     };
+    if (session.deferredScheduleRun) {
+      const binding = readDeferredTopicBinding(config.session.dataDir, session.sessionId);
+      if (!binding) {
+        // A daemon restart makes an unmaterialized hidden run ambiguous: there
+        // is no visible conversation to resume and no safe user-facing place
+        // to report recovery. Fence its backing process and close the audit row
+        // instead of resurrecting an invisible worker.
+        const backendType = getSessionPersistentBackendType(ds);
+        if (backendType) {
+          killPersistentSession(backendType, persistentSessionName(backendType, session.sessionId));
+        }
+        sessionStore.closeSession(session.sessionId);
+        removeDeferredTopicBinding(config.session.dataDir, session.sessionId);
+        logger.info(`[${session.sessionId.substring(0, 8)}] Closed unmaterialized deferred schedule run during restore`);
+        continue;
+      }
+      const nowIso = new Date().toISOString();
+      const aliases = { ...(session.replyThreadAliases ?? {}) };
+      aliases[binding.rootMessageId] = {
+        createdAt: aliases[binding.rootMessageId]?.createdAt ?? binding.createdAt,
+        lastUsedAt: nowIso,
+      };
+      session.replyThreadAliases = aliases;
+      session.rootMessageId = binding.rootMessageId;
+      ds.replyThreadAliases = aliases;
+      sessionStore.updateSession(session);
+    }
     if (await closeActiveSessionIfCliMismatch(ds)) continue;
     const anchor = sessionAnchorId(ds);
     messageQueue.ensureQueue(anchor);
@@ -1517,12 +1545,14 @@ export async function ensureTerminalWorkerPort(ds: DaemonSession): Promise<numbe
  *   - 'vc_receiver_managed' — dedicated meeting receivers are reconstructed
  *                          through the meeting membership/hub lifecycle; a
  *                          manual resume could resurrect a stale member epoch
+ *   - 'deferred_unmaterialized' — a silent fresh-topic run finished without
+ *                          publishing, so it has no conversation to resume
  */
 export async function resumeSession(
   sessionId: string,
   activeSessions: Map<string, DaemonSession>,
 ): Promise<{ ok: true; ds: DaemonSession }
-| { ok: false; error: 'not_found' | 'not_closed' | 'anchor_occupied' | 'adopt_unsupported' | 'vc_receiver_managed'; activeSessionId?: string }> {
+| { ok: false; error: 'not_found' | 'not_closed' | 'anchor_occupied' | 'adopt_unsupported' | 'vc_receiver_managed' | 'deferred_unmaterialized'; activeSessionId?: string }> {
   const session = sessionStore.getSession(sessionId);
   if (!session) return { ok: false, error: 'not_found' };
   if (session.status !== 'closed') return { ok: false, error: 'not_closed' };
@@ -1539,6 +1569,15 @@ export async function resumeSession(
     return { ok: false, error: 'vc_receiver_managed' };
   }
 
+  // Auto-closed invisible schedule runs are audit records, not conversations.
+  // Without a materialized binding, resuming one would wake a virtual chat-
+  // scope anchor that no inbound Lark message can reach; a later botmux send
+  // would also fall through to the ordinary group top level. Keep it closed.
+  if (session.deferredScheduleRun
+    && !readDeferredTopicBinding(config.session.dataDir, session.sessionId)) {
+    return { ok: false, error: 'deferred_unmaterialized' };
+  }
+
   // Adopt sessions don't survive /close — the user's tmux pane and original
   // CLI pid have already moved on, and bringing the bridge back without a live
   // pane is meaningless.
@@ -1548,7 +1587,7 @@ export async function resumeSession(
 
   const scope: 'thread' | 'chat' = session.scope === 'chat' ? 'chat' : 'thread';
   const larkAppId = session.larkAppId ?? getAllBots()[0]?.config.larkAppId ?? '';
-  const anchor = scope === 'thread' ? session.rootMessageId : session.chatId;
+  const anchor = storedSessionAnchorId(session);
   const key = sessionKey(anchor, larkAppId);
 
   // In-memory occupant check. A daemon-command scratch (e.g. an unconfirmed
@@ -1602,7 +1641,7 @@ export async function resumeSession(
     && s.status === 'active'
     && (s.larkAppId ?? '') === larkAppId
     && (s.scope === 'chat' ? 'chat' : 'thread') === scope
-    && (scope === 'thread' ? s.rootMessageId === anchor : s.chatId === anchor),
+    && storedSessionAnchorId(s) === anchor,
   );
   const realConflict = conflicts.find(s => !!s.cliId || !!s.lastCliInput);
   if (realConflict) {
@@ -1750,14 +1789,10 @@ export async function executeScheduledTask(
   const executionPosition = resolveScheduledTaskExecutionPosition(task);
   const scope = resolveScheduledTaskScope(task);
 
-  // Silent execution: post no "🕐 task started" banner / creator notice and
-  // reuse the pre-existing anchor (thread rootMessageId or chatId) directly.
-  // Top-level and retained-topic positions already have anchors, so silent is
-  // valid there. Fresh-topic execution needs a visible seed and is rejected.
+  // Silent execution posts no "🕐 task started" banner / creator notice.
+  // A silent fresh-topic run receives a durable virtual anchor below; its real
+  // Lark root is materialized only by the first successful `botmux send`.
   const silent = task.silent === true;
-  if (executionPosition === 'new-topic' && silent) {
-    throw new Error('silent_new_topic_exclusive');
-  }
 
   // Every fire gets a stable identity before it enters a worker queue. Besides
   // silent-output suppression, this identifies the exact shared-topic reply
@@ -1778,29 +1813,34 @@ export async function executeScheduledTask(
   // Chat-scope (auto-adopt / 普通群): post the start notification straight to
   // the chat without reply_in_thread. The bot/chat regular-group mode then
   // decides whether that top-level trigger stays flat, opens a shared topic, or
-  // starts an independent topic/session. Silent fires have no trigger message,
-  // so they remain chat-scoped until the model chooses to send an alert.
+  // starts an independent topic/session. Silent top-level fires have no
+  // trigger message, so they retain the ordinary chat-scope behavior.
   let anchor: string;
   let isContinuation = false;
   let sharedTopicRootId: string | undefined;
 
   if (executionPosition === 'new-topic') {
-    if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
-      const creatorAppId = task.creatorLarkAppId ?? larkAppId;
-      replyMessage(
-        creatorAppId,
-        task.creatorRootMessageId,
-        t('scheduler.task_triggered_target_chat', { name: task.name }, localeForBot(creatorAppId)),
-        'text',
-        true,
-      ).catch((err: any) => {
-        logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
-      });
+    if (silent) {
+      anchor = `schedule-run:${task.id}:${scheduledTurnId.slice(scheduledTurnId.lastIndexOf(':') + 1)}`;
+      isContinuation = false;
+    } else {
+      if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
+        const creatorAppId = task.creatorLarkAppId ?? larkAppId;
+        replyMessage(
+          creatorAppId,
+          task.creatorRootMessageId,
+          t('scheduler.task_triggered_target_chat', { name: task.name }, localeForBot(creatorAppId)),
+          'text',
+          true,
+        ).catch((err: any) => {
+          logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
+        });
+      }
+      const topicSeed = task.topicTitle?.trim()
+        || t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId));
+      anchor = await sendMessage(larkAppId, task.chatId, topicSeed);
+      isContinuation = false;
     }
-    const topicSeed = task.topicTitle?.trim()
-      || t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId));
-    anchor = await sendMessage(larkAppId, task.chatId, topicSeed);
-    isContinuation = false;
   } else if (scope === 'chat') {
     // Explicit task choice: chat scope always starts at the group top level.
     // A retained rootMessageId is only a bookmark that lets the user switch the
@@ -1947,12 +1987,23 @@ export async function executeScheduledTask(
   // chatId-as-seed for audit (sessionAnchorId() returns chatId via scope). If a
   // formerly chat-scope task was redirected into a converted topic chat, promote
   // the runtime session to thread-scope so follow-up replies stay in-thread.
-  const runtimeScope: 'thread' | 'chat' =
-    scope === 'chat' && anchor !== task.chatId ? 'thread' : scope;
+  const deferredFreshTopic = executionPosition === 'new-topic' && silent;
+  const runtimeScope: 'thread' | 'chat' = deferredFreshTopic
+    ? 'chat'
+    : scope === 'chat' && anchor !== task.chatId ? 'thread' : scope;
   const session = sessionStore.createSession(task.chatId, anchor, `${t('schedule.title_prefix', undefined, localeForBot(larkAppId))} ${task.name}`, task.chatType === 'p2p' ? 'p2p' : 'group');
   const now = Date.now();
   session.larkAppId = larkAppId;
   session.scope = runtimeScope;
+  if (deferredFreshTopic) {
+    session.deferredScheduleRun = {
+      taskId: task.id,
+      turnId: scheduledTurnId,
+      routingAnchor: anchor,
+      ...(task.topicTitle?.trim() ? { topicTitle: task.topicTitle.trim() } : {}),
+      createdAt: new Date(now).toISOString(),
+    };
+  }
   session.lastMessageAt = new Date(now).toISOString();
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);

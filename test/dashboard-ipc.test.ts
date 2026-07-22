@@ -880,8 +880,16 @@ describe('POST /api/schedules execution position', () => {
     addSpy.mockRestore();
   });
 
-  it('rejects fresh-topic + silent before persisting a task', async () => {
+  it('accepts fresh-topic + silent as a lazily materialized topic', async () => {
     setLarkAppId('cli_schedule_test');
+    const addSpy = vi.spyOn(scheduler, 'addTask').mockImplementation((params: any) => ({
+      ...params,
+      id: 'silent-fresh-1',
+      parsed: { kind: 'interval', minutes: 30, display: 'every 30m' },
+      enabled: true,
+      createdAt: '2026-07-21T00:00:00.000Z',
+      deliver: 'origin',
+    }));
     handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
     const res = await fetch(`http://127.0.0.1:${handle.port}/api/schedules`, {
       method: 'POST',
@@ -896,8 +904,19 @@ describe('POST /api/schedules execution position', () => {
       }),
     });
 
-    expect(res.status).toBe(400);
-    expect((await res.json()).error).toBe('silent_new_topic_exclusive');
+    expect(res.status).toBe(200);
+    expect((await res.json()).task).toMatchObject({
+      name: '静默巡检',
+      executionPosition: 'new-topic',
+      scope: 'chat',
+      silent: true,
+    });
+    expect(addSpy).toHaveBeenCalledWith(expect.objectContaining({
+      executionPosition: 'new-topic',
+      scope: 'chat',
+      silent: true,
+    }));
+    addSpy.mockRestore();
   });
 });
 

@@ -795,10 +795,6 @@ async function handleScheduleCommand(
     const { executionPosition: requestedPosition, silent, prompt: schedPrompt } = scheduler.extractScheduleModifiers(parsed.prompt);
     const executionPosition = requestedPosition
       ?? (capturedScope === 'thread' ? 'topic' : 'top-level');
-    if (executionPosition === 'new-topic' && silent) {
-      await sessionReply(rootId, t('schedule.silent_new_topic_conflict', undefined, loc));
-      return;
-    }
     const taskScope: 'thread' | 'chat' = executionPosition === 'topic' ? 'thread' : 'chat';
     const schedName = schedPrompt !== parsed.prompt
       ? (schedPrompt.length > 20 ? schedPrompt.slice(0, 20) + '...' : schedPrompt)

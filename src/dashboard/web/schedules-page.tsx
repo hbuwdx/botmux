@@ -512,7 +512,6 @@ function ScheduleFormModal(props: {
     e.preventDefault();
     if (!editing && !larkAppId) return;
     if (!localDelivery && executionPosition === 'topic' && !rootMessageId.trim()) return;
-    if (executionPosition === 'new-topic' && silent) return;
     props.onSubmit({
       name,
       schedule,
@@ -685,14 +684,13 @@ function ScheduleFormModal(props: {
               type="checkbox"
               checked={silent}
               onChange={e => setSilent(e.target.checked)}
-              disabled={executionPosition === 'new-topic'}
             />
             <span>
               {tr('schedules.form.silent')}
               <small className="schedule-form-help">{tr('schedules.form.silentHelp')}</small>
             </span>
           </label>
-          {executionPosition === 'new-topic' ? (
+          {executionPosition === 'new-topic' && silent ? (
             <p className="schedule-form-help">{tr('schedules.form.silentNewTopicConflict')}</p>
           ) : null}
           {props.error ? (
@@ -706,8 +704,7 @@ function ScheduleFormModal(props: {
               type="submit"
               className="schedule-form-submit"
               disabled={(!editing && !larkAppId)
-                || (!localDelivery && executionPosition === 'topic' && !rootMessageId.trim())
-                || (executionPosition === 'new-topic' && silent)}
+                || (!localDelivery && executionPosition === 'topic' && !rootMessageId.trim())}
             >
               {editing ? tr('schedules.form.save') : tr('schedules.form.create')}
             </button>

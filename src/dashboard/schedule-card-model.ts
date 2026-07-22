@@ -57,8 +57,8 @@ export interface ScheduleCardTaskInput {
    *  `times === null` ⇒ forever; finite `times` ⇒ auto-removes after N runs.
    *  `completed` counts how many runs have fired. */
   repeat?: { times: number | null; completed: number };
-  /** Silent fires (no start banner, model decides whether to send). Supported
-   *  at both group top level and under a retained topic root. */
+  /** Silent fires (no start banner, model decides whether to send). A fresh
+   *  topic is materialized lazily by the first botmux send. */
   silent?: boolean;
 }
 
@@ -233,9 +233,6 @@ export function computeDeliveryButtonAvailability(
   if (target === 'topic' && !task.rootMessageId) {
     return { enabled: false, reasonKey: 'schedules.action.delivery.topicRootRequired' };
   }
-  if (target === 'new-topic' && task.silent) {
-    return { enabled: false, reasonKey: 'schedules.action.delivery.silentOriginOnly' };
-  }
   if (current === target) {
     return {
       enabled: false,
@@ -253,8 +250,7 @@ export function nextScheduleExecutionPosition(task: ScheduleCardTaskInput): 'top
   const placement = resolveScheduleExecutionPlacement(task);
   if (placement === 'thread') return 'top-level';
   if (placement === 'new-topic') return task.rootMessageId ? 'topic' : 'top-level';
-  if (!task.silent) return 'new-topic';
-  return task.rootMessageId ? 'topic' : 'top-level';
+  return 'new-topic';
 }
 
 /** Build a single ScheduleRowDto for list rendering. */
