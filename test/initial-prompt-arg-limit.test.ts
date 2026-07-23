@@ -4,7 +4,11 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createPiAdapter } from '../src/adapters/cli/pi.js';
 import { shouldQueueInitialPrompt } from '../src/codex-rpc-lifecycle.js';
-import { shouldDeferInitialPromptForArgLimit } from '../src/utils/pending-input-queue.js';
+import {
+  resolveInitialPromptDelivery,
+  shouldDeferInitialPromptForArgLimit,
+} from '../src/utils/pending-input-queue.js';
+import { PI_INITIAL_PROMPT_COMMAND } from '../src/adapters/cli/pi-initial-prompt-extension.js';
 
 process.env.BOTMUX_TIME_SCALE ??= '0.01';
 
@@ -82,5 +86,32 @@ describe('initial prompt argv byte-limit fallback', () => {
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
     }
+  });
+
+  it('uses Pi native message delivery instead of TUI-pasting a transformed long prompt when deferred', () => {
+    const original = 'x'.repeat(10_000);
+    const preparedArg = '@/data/pi-initial-prompts/session/initial.prompt.md';
+    expect(resolveInitialPromptDelivery({
+      originalPrompt: original,
+      preparedArg,
+      preparedDeferredContent: PI_INITIAL_PROMPT_COMMAND,
+      defer: true,
+    })).toEqual({
+      queuedContent: PI_INITIAL_PROMPT_COMMAND,
+      logicalContent: original,
+    });
+  });
+
+  it('preserves legacy argv and deferred queue behavior without an adapter command', () => {
+    expect(resolveInitialPromptDelivery({
+      originalPrompt: 'hello',
+      preparedArg: 'prepared',
+      defer: false,
+    })).toEqual({ argvPrompt: 'prepared' });
+    expect(resolveInitialPromptDelivery({
+      originalPrompt: 'hello',
+      preparedArg: 'prepared',
+      defer: true,
+    })).toEqual({ queuedContent: 'hello' });
   });
 });

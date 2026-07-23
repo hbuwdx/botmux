@@ -103,6 +103,7 @@ describe('worker.ts startup-commands wiring', () => {
     // adapter-level preparation may also rewrite long prompts to safe argv tokens.
     expect(src).toContain('cliAdapter.prepareInitialPromptArg?.({');
     expect(src).toContain('promptArgPreparationChanged = preparedInitialPrompt !== cfg.prompt;');
+    expect(src).toContain('resolveInitialPromptDelivery({');
     expect(src).toContain('initialPrompt: preparedInitialPrompt,');
     expect(src).toContain('shouldDeferInitialPromptForArgLimit({');
     expect(src).toContain('maxInitialPromptArgBytes: cliAdapter.maxInitialPromptArgBytes,');
@@ -111,5 +112,9 @@ describe('worker.ts startup-commands wiring', () => {
     expect(src).toContain('shouldQueueInitialPrompt({');
     expect(src).toContain('passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,');
     expect(src).toContain('deferInitialPrompt,');
+    expect(src).toContain('content: lastSpawnQueuedInitialPrompt ?? msg.prompt,');
+    expect(src).toContain('logicalContent: lastSpawnQueuedInitialPromptLogicalContent');
+    expect(src).toContain('args.unshift(...piInitialPromptAdditionalArgs);');
+    expect(src).toContain('Object.assign(childEnv, piInitialPromptEnv);');
   });
 });

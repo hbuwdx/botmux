@@ -119,7 +119,19 @@ export interface CliAdapter {
     initialPrompt: string;
     sessionId: string;
     sessionDataDir?: string;
-  }): { initialPrompt: string; readonlyRoots?: string[]; cleanupPaths?: string[] };
+  }): {
+    initialPrompt: string;
+    readonlyRoots?: string[];
+    cleanupPaths?: string[];
+    cleanupDirs?: string[];
+    /** Safe, short TUI input used only when worker policy must defer this
+     * prepared argv prompt (startup commands, durable cold-start, etc.). */
+    deferredInput?: {
+      content: string;
+      additionalArgs?: string[];
+      env?: Record<string, string>;
+    };
+  };
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
    *  The worker skips queuing the prompt for stdin write unless another
