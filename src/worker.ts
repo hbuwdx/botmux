@@ -264,6 +264,15 @@ let remoteWsUrl: string | undefined;
 let remoteThreadId: string | undefined;
 let rpcDialogDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let rpcEnginePidMarker: string | null = null;
+const piInitialPromptCleanupPaths: string[] = [];
+
+function cleanupPiInitialPromptFiles(): void {
+  while (piInitialPromptCleanupPaths.length > 0) {
+    const p = piInitialPromptCleanupPaths.pop();
+    if (!p) continue;
+    try { unlinkSync(p); } catch { /* best effort */ }
+  }
+}
 
 function stopCodexRpcEngine(): void {
   const engine = codexRpcEngine;
@@ -755,6 +764,7 @@ let reattachIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
  *  adapter's hermesBridgeAttach reads the correct mode. */
 let lastSpawnEffectiveResume = false;
 let lastSpawnEffectiveCliSessionId: string | undefined;
+let lastSpawnDeferInitialPrompt = false;
 let idleDetector: IdleDetector | null = null;
 let isTmuxMode = false;
 /** True once a crash diagnostic tmux shell (bmx-diag-<sid>) is live. */
@@ -6291,6 +6301,23 @@ async function spawnCli(
   // baking it into args would drop the message that triggered the resume.
   // Finally, defer adapter-declared over-limit prompts to avoid backend command
   // string limits (tmux "command too long") while preserving short argv prompts.
+  let preparedInitialPrompt: string | undefined;
+  let promptArgPreparationChanged = false;
+  if (cfg.prompt) {
+    const prepared = cliAdapter.prepareInitialPromptArg?.({
+      initialPrompt: cfg.prompt,
+      sessionId: effectiveAdapterSessionId,
+      sessionDataDir: process.env.SESSION_DATA_DIR,
+    });
+    if (prepared?.readonlyRoots?.length) {
+      cfg.skillReadonlyRoots = [...(cfg.skillReadonlyRoots ?? []), ...prepared.readonlyRoots];
+    }
+    if (prepared?.cleanupPaths?.length) {
+      piInitialPromptCleanupPaths.push(...prepared.cleanupPaths);
+    }
+    preparedInitialPrompt = prepared?.initialPrompt ?? cfg.prompt;
+    promptArgPreparationChanged = preparedInitialPrompt !== cfg.prompt;
+  }
   const deferInitialPrompt = shouldDeferInitialPromptForStartup({
     hasStartupCommands: !!cfg.startupCommands?.length,
     adoptMode: cfg.adoptMode === true,
@@ -6300,11 +6327,13 @@ async function spawnCli(
     adoptMode: cfg.adoptMode === true,
     dispatchAttempt: cfg.dispatchAttempt,
   }) || (effectiveResume && cliAdapter.initialPromptArgsIgnoredOnResume === true)
-    || shouldDeferInitialPromptForArgLimit({
+    || (!promptArgPreparationChanged && shouldDeferInitialPromptForArgLimit({
       passesInitialPromptViaArgs: cliAdapter.passesInitialPromptViaArgs === true,
       prompt: cfg.prompt,
       maxInitialPromptArgBytes: cliAdapter.maxInitialPromptArgBytes,
-    });
+    }));
+  if (deferInitialPrompt) preparedInitialPrompt = undefined;
+  lastSpawnDeferInitialPrompt = deferInitialPrompt;
   kiroSessionIdCaptureArmed = cfg.cliId === 'kiro-cli' && !effectiveCliSessionId && !willReattachPersistent;
   kiroSessionIdCaptureBuffer = '';
   // Per-bot local read isolation: assemble the Seatbelt profile context (the gate
@@ -6386,7 +6415,7 @@ async function spawnCli(
     resume: effectiveResume,
     workingDir: cfg.workingDir,
     resumeSessionId: effectiveCliSessionId,
-    initialPrompt: deferInitialPrompt ? undefined : (cfg.prompt || undefined),
+    initialPrompt: preparedInitialPrompt,
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
     larkAppId: cfg.larkAppId,
@@ -7556,6 +7585,7 @@ function killCli(opts: { preservePending?: boolean } = {}): void {
   currentCliCredentialIsolated = false;
   stopSessionMcpGatewayHost();
   stopCodexRpcEngine();
+  cleanupPiInitialPromptFiles();
   destroyCrashDiagnosticTerminal('killCli');
   idleDetector?.dispose();
   idleDetector = null;
@@ -9015,20 +9045,7 @@ process.on('message', async (raw: unknown) => {
         // Tier-1/Tier-2 fresh demotion, which clears the flag). Adopt spawns
         // return from spawnCli before that write — exclude them explicitly so
         // the stale module-level value can't leak in.
-        const deferInitialPrompt = shouldDeferInitialPromptForStartup({
-          hasStartupCommands: !!msg.startupCommands?.length,
-          adoptMode: msg.adoptMode === true,
-          passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,
-        }) || shouldDeferArgsBakedDurablePrompt({
-          passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,
-          adoptMode: msg.adoptMode === true,
-          dispatchAttempt: msg.dispatchAttempt,
-        }) || (msg.adoptMode !== true && lastSpawnEffectiveResume && cliAdapter?.initialPromptArgsIgnoredOnResume === true)
-          || shouldDeferInitialPromptForArgLimit({
-            passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,
-            prompt: msg.prompt,
-            maxInitialPromptArgBytes: cliAdapter?.maxInitialPromptArgBytes,
-          });
+        const deferInitialPrompt = lastSpawnDeferInitialPrompt;
         if (msg.prompt && cliAdapter?.passesInitialPromptViaArgs && !deferInitialPrompt && codexBridgeFallbackActive()) {
           // Args-baked first prompts (notably Pi) never pass through the normal
           // 'message' IPC path, so the structured bridge would otherwise see the
@@ -9502,6 +9519,7 @@ process.on('message', async (raw: unknown) => {
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 function cleanup(): void {
+  cleanupPiInitialPromptFiles();
   stopSessionMcpGatewayHost();
   if (tmuxRestartTimer) {
     clearTimeout(tmuxRestartTimer);
